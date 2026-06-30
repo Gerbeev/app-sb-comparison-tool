@@ -1,7 +1,0 @@
-{
-  "type": "Universal Task",
-  "agentName": "machine01",
-  "calendarName": "BUSINESS_DAYS",
-  "credentialName": "CRED_APP",
-  "command": "/app/job_a.sh ${RUN_DATE}"
-}

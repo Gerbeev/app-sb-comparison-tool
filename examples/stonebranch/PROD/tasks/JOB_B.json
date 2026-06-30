@@ -1,6 +1,0 @@
-{
-  "type": "Universal Task",
-  "predecessorTask": "JOB_A",
-  "agentName": "machine01",
-  "command": "/app/job_b.sh"
-}
