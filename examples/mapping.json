@@ -1,0 +1,9 @@
+{
+  "node_mappings": [],
+  "name_rewrites": [],
+  "kind_aliases": {
+    "job": "task",
+    "command_job": "task",
+    "machine": "agent"
+  }
+}
