@@ -1,0 +1,34 @@
+{
+  "source_system": "stonebranch",
+  "env": "PROD",
+  "nodes_total": 9,
+  "edges_total": 10,
+  "task_nodes": 2,
+  "synthetic_nodes": 2,
+  "low_confidence_edges": 0,
+  "orphan_nodes": 0,
+  "orphan_tasks": 0,
+  "tasks_without_inbound_dependency": 1,
+  "tasks_without_outbound_dependency": 0,
+  "tasks_without_trigger": 1,
+  "condition_nodes": 0,
+  "conditions_not_parsed": 0,
+  "object_types": {
+    "agent": 1,
+    "calendar": 1,
+    "command": 2,
+    "credential": 1,
+    "task": 2,
+    "trigger": 1,
+    "variable": 1
+  },
+  "relation_types": {
+    "depends_on_success": 1,
+    "runs_command": 2,
+    "runs_on": 2,
+    "starts": 1,
+    "uses_calendar": 2,
+    "uses_credential": 1,
+    "uses_variable": 1
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "pack_schema_version": "1.0",
+  "pack_type": "stonebranch-analysis-pack",
+  "source_system": "stonebranch",
+  "env": "PROD",
+  "created_at": "2026-06-30T21:47:23.159779+00:00",
+  "source_path": ".",
+  "graph_file": "graph.json",
+  "metrics_file": "metrics.json",
+  "objects_file": "objects.csv",
+  "edges_file": "edges.csv",
+  "settings": {
+    "include_raw_values": false,
+    "deep_scan": false,
+    "env_aware": false
+  },
+  "counts": {
+    "nodes": 9,
+    "edges": 10
+  },
+  "important_files": [
+    "README.md",
+    "report.md",
+    "graph.json",
+    "metrics.json",
+    "indexes/node-index.json",
+    "indexes/adjacency.json",
+    "graphs/full.mmd",
+    "reports/top-connected.md",
+    "reports/orphans.md"
+  ]
+}

@@ -1,0 +1,11 @@
+id,source,target,relation,source_system,native_relation,evidence_file,evidence_path,evidence_key,evidence_value,confidence
+1394be166445d47212f26d2b,stonebranch:PROD:task:JOB_B,stonebranch:PROD:command:abe08ff03ed79b2a,runs_command,stonebranch,references_command,examples\stonebranch\PROD\tasks\JOB_B.json,$.command,command,abe08ff03ed79b2a,0.95
+4f949d529950362469206f76,stonebranch:PROD:task:JOB_A,stonebranch:PROD:agent:machine01,runs_on,stonebranch,references_agent,examples\stonebranch\PROD\tasks\JOB_A.json,$.agentName,agentName,machine01,0.95
+8052a2e93580449b34604e25,stonebranch:PROD:task:JOB_A,stonebranch:PROD:credential:CRED_APP,uses_credential,stonebranch,references_credential,examples\stonebranch\PROD\tasks\JOB_A.json,$.credentialName,credentialName,CRED_APP,0.95
+835d1738ba0dfe8d73782f59,stonebranch:PROD:task:JOB_B,stonebranch:PROD:agent:machine01,runs_on,stonebranch,references_agent,examples\stonebranch\PROD\tasks\JOB_B.json,$.agentName,agentName,machine01,0.95
+a8402bcccaf9c806cea1bce0,stonebranch:PROD:task:JOB_A,stonebranch:PROD:variable:RUN_DATE,uses_variable,stonebranch,variable_token,examples\stonebranch\PROD\tasks\JOB_A.json,$.command,command,RUN_DATE,0.95
+a896bf71bf9d188c461205cb,stonebranch:PROD:task:JOB_A,stonebranch:PROD:command:839f31339ca67757,runs_command,stonebranch,references_command,examples\stonebranch\PROD\tasks\JOB_A.json,$.command,command,839f31339ca67757,0.95
+b2151d973dea23ef22eec1b8,stonebranch:PROD:trigger:TRG_JOB_A,stonebranch:PROD:calendar:BUSINESS_DAYS,uses_calendar,stonebranch,references_calendar,examples\stonebranch\PROD\triggers\TRG_JOB_A.json,$.calendarName,calendarName,BUSINESS_DAYS,0.95
+bd3d410550b6516fd5766dc5,stonebranch:PROD:trigger:TRG_JOB_A,stonebranch:PROD:task:JOB_A,starts,stonebranch,references_trigger,examples\stonebranch\PROD\triggers\TRG_JOB_A.json,$.taskName,taskName,JOB_A,0.95
+dd70985d00fb8925d6997c5a,stonebranch:PROD:task:JOB_B,stonebranch:PROD:task:JOB_A,depends_on_success,stonebranch,references_predecessor,examples\stonebranch\PROD\tasks\JOB_B.json,$.predecessorTask,predecessorTask,JOB_A,0.95
+fbf4b2d893c8db94390f8d47,stonebranch:PROD:task:JOB_A,stonebranch:PROD:calendar:BUSINESS_DAYS,uses_calendar,stonebranch,references_calendar,examples\stonebranch\PROD\tasks\JOB_A.json,$.calendarName,calendarName,BUSINESS_DAYS,0.95

@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
-import shlex
 from typing import Any
 
 from stonebranch_graph.config import AnalyzerConfig
@@ -17,6 +16,7 @@ from stonebranch_graph.core import (
     redacted_preview,
     stable_hash,
 )
+from stonebranch_graph.normalizers import command_evidence, command_hash, condition_hash, normalize_command, normalize_condition
 from stonebranch_graph.utils import is_secret_key, normalized_kind, read_text_file, safe_metadata
 
 
@@ -133,7 +133,7 @@ class AutosysJilParser:
             current_action = "insert_job"
             current_line = 1
 
-        for line_no, raw_line in enumerate(text.splitlines(), start=1):
+        for line_no, raw_line in enumerate(self._join_continuations(text), start=1):
             line = self._strip_comments(raw_line).strip()
             if not line:
                 continue
@@ -160,6 +160,24 @@ class AutosysJilParser:
 
         flush()
         return jobs, deleted_jobs
+
+
+    def _join_continuations(self, text: str) -> list[str]:
+        lines: list[str] = []
+        buffer = ""
+        for raw in text.splitlines():
+            if buffer:
+                buffer += " " + raw.strip()
+            else:
+                buffer = raw
+            if buffer.rstrip().endswith("\\"):
+                buffer = buffer.rstrip()[:-1].rstrip()
+                continue
+            lines.append(buffer)
+            buffer = ""
+        if buffer:
+            lines.append(buffer)
+        return lines
 
     def _strip_comments(self, line: str) -> str:
         stripped = line.strip()
@@ -209,13 +227,17 @@ class AutosysJilParser:
 
     def _job_metadata(self, job: JilJob) -> dict[str, Any]:
         command = job.attributes.get("command", "")
-        return {
+        metadata = {
             "action": job.action,
             "start_line": job.start_line,
-            "command_hash": stable_hash(self._normalize_command(command), 16) if command else "",
+            "command_hash": command_hash(command) if command else "",
             "condition_raw": job.attributes.get("condition", ""),
+            "condition_hash": condition_hash(job.attributes.get("condition", "")) if job.attributes.get("condition") else "",
             "has_condition": bool(job.attributes.get("condition")),
         }
+        if command and self.config.include_raw_values:
+            metadata["command_raw"] = normalize_command(command)
+        return metadata
 
     def _ensure_ref_node(
         self,
@@ -299,17 +321,17 @@ class AutosysJilParser:
         command = job.attributes.get("command")
         if not command or is_secret_key("command"):
             return
-        normalized = self._normalize_command(command)
-        command_hash = stable_hash(normalized, 16)
+        command_hash_value = command_hash(command)
         node = self._ensure_ref_node(
             graph,
             "command",
-            command_hash,
+            command_hash_value,
             "command_hash",
             job.source_file,
-            metadata={"command_hash": command_hash, "preview": redacted_preview(normalized, 80)},
+            metadata={"command_hash": command_hash_value},
         )
-        self._add_edge(graph, source_id, node.id, "runs_command", "command", job, command_hash)
+        evidence = command_evidence(command, include_raw_values=self.config.include_raw_values)
+        self._add_edge(graph, source_id, node.id, "runs_command", "command", job, evidence)
 
     def _add_watch_file_edge(self, graph: Graph, job: JilJob, source_id: str) -> None:
         watch_file = job.attributes.get("watch_file")
@@ -373,13 +395,6 @@ class AutosysJilParser:
             refs.append((event, job_name))
         return refs
 
-    def _normalize_command(self, command: str) -> str:
-        command = " ".join(command.split())
-        try:
-            parts = shlex.split(command, posix=False)
-            return " ".join(parts)
-        except ValueError:
-            return command
 
     def _split_csv_like(self, value: str) -> list[str]:
         return [item.strip().strip('"').strip("'") for item in re.split(r"[,\s]+", value) if item.strip()]

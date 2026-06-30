@@ -1,0 +1,22 @@
+digraph dependencies {
+  rankdir=LR;
+  "stonebranch:PROD:agent:machine01" [label="stonebranch/PROD/agent: machine01"];
+  "stonebranch:PROD:calendar:BUSINESS_DAYS" [label="stonebranch/PROD/calendar: BUSINESS_DAYS"];
+  "stonebranch:PROD:command:839f31339ca67757" [label="stonebranch/PROD/command: 839f31339ca67757"];
+  "stonebranch:PROD:command:abe08ff03ed79b2a" [label="stonebranch/PROD/command: abe08ff03ed79b2a"];
+  "stonebranch:PROD:credential:CRED_APP" [label="stonebranch/PROD/credential: CRED_APP"];
+  "stonebranch:PROD:task:JOB_A" [label="stonebranch/PROD/task: JOB_A"];
+  "stonebranch:PROD:task:JOB_B" [label="stonebranch/PROD/task: JOB_B"];
+  "stonebranch:PROD:trigger:TRG_JOB_A" [label="stonebranch/PROD/trigger: TRG_JOB_A"];
+  "stonebranch:PROD:variable:RUN_DATE" [label="stonebranch/PROD/variable: RUN_DATE"];
+  "stonebranch:PROD:task:JOB_B" -> "stonebranch:PROD:command:abe08ff03ed79b2a" [label="runs_command"];
+  "stonebranch:PROD:task:JOB_A" -> "stonebranch:PROD:agent:machine01" [label="runs_on"];
+  "stonebranch:PROD:task:JOB_A" -> "stonebranch:PROD:credential:CRED_APP" [label="uses_credential"];
+  "stonebranch:PROD:task:JOB_B" -> "stonebranch:PROD:agent:machine01" [label="runs_on"];
+  "stonebranch:PROD:task:JOB_A" -> "stonebranch:PROD:variable:RUN_DATE" [label="uses_variable"];
+  "stonebranch:PROD:task:JOB_A" -> "stonebranch:PROD:command:839f31339ca67757" [label="runs_command"];
+  "stonebranch:PROD:trigger:TRG_JOB_A" -> "stonebranch:PROD:calendar:BUSINESS_DAYS" [label="uses_calendar"];
+  "stonebranch:PROD:trigger:TRG_JOB_A" -> "stonebranch:PROD:task:JOB_A" [label="starts"];
+  "stonebranch:PROD:task:JOB_B" -> "stonebranch:PROD:task:JOB_A" [label="depends_on_success"];
+  "stonebranch:PROD:task:JOB_A" -> "stonebranch:PROD:calendar:BUSINESS_DAYS" [label="uses_calendar"];
+}

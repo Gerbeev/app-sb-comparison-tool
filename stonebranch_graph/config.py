@@ -152,6 +152,7 @@ class AnalyzerConfig:
     relation_aliases: dict[str, str] | None = None
     kind_aliases: dict[str, str] | None = None
     max_evidence_value_len: int = 180
+    include_raw_values: bool = False
 
     @staticmethod
     def default() -> "AnalyzerConfig":
@@ -179,6 +180,22 @@ class AnalyzerConfig:
             relation_aliases=data.get("relation_aliases", base.relation_aliases),
             kind_aliases=data.get("kind_aliases", base.kind_aliases),
             max_evidence_value_len=int(data.get("max_evidence_value_len", base.max_evidence_value_len)),
+            include_raw_values=bool(data.get("include_raw_values", base.include_raw_values)),
+        )
+
+
+
+    def with_runtime_flags(self, *, include_raw_values: bool | None = None) -> "AnalyzerConfig":
+        return AnalyzerConfig(
+            folder_kind_map=self.folder_kind_map,
+            ignored_filenames=self.ignored_filenames,
+            stonebranch_name_keys=self.stonebranch_name_keys,
+            stonebranch_type_keys=self.stonebranch_type_keys,
+            stonebranch_reference_keywords=self.stonebranch_reference_keywords,
+            relation_aliases=self.relation_aliases,
+            kind_aliases=self.kind_aliases,
+            max_evidence_value_len=self.max_evidence_value_len,
+            include_raw_values=self.include_raw_values if include_raw_values is None else include_raw_values,
         )
 
 
@@ -204,10 +221,14 @@ class MappingConfig:
         data = json.loads(path.read_text(encoding="utf-8"))
         mappings: dict[str, str] = {}
         for item in data.get("node_mappings", []):
-            left = item.get("stonebranch")
-            right = item.get("jil")
+            left = item.get("stonebranch") or item.get("left") or item.get("source")
+            right = item.get("jil") or item.get("right") or item.get("target")
             if left and right:
-                mappings[left] = right
+                mappings[str(left)] = str(right)
+
+        # Also support simple object form: {"mappings": {"left": "right"}}
+        for left, right in data.get("mappings", {}).items():
+            mappings[str(left)] = str(right)
 
         return MappingConfig(
             node_mappings=mappings,

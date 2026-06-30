@@ -16,6 +16,7 @@ from stonebranch_graph.core import (
     redacted_preview,
     stable_hash,
 )
+from stonebranch_graph.normalizers import command_evidence, command_hash
 from stonebranch_graph.utils import first_string, is_secret_key, normalized_kind, safe_metadata
 
 
@@ -48,16 +49,14 @@ class StonebranchJsonParser:
     def parse(self, input_path: Path) -> Graph:
         files = self._load_json_files(input_path)
         graph = Graph(source_system="stonebranch", env=self.env)
-        records: list[tuple[Path, str, str, str, dict[str, Any]]] = []
+        records: list[tuple[Path, str, str, str, str, dict[str, Any]]] = []
 
         for path, relative_path, data in files:
             if not isinstance(data, dict):
                 continue
-
             kind = self._kind_from_path(path)
             if not kind:
                 continue
-
             env = self._env_from_path(path) if self.env_aware else self.env
             name = self._detect_object_name(data, kind, path)
             native_kind = self._native_kind(data) or kind
@@ -71,33 +70,23 @@ class StonebranchJsonParser:
                 attributes=data,
             )
             graph.add_node(node)
-            records.append((path, relative_path, env, name, data))
+            records.append((path, relative_path, env, kind, name, data))
 
         registry = self._build_registry(graph)
 
-        for path, relative_path, env, source_name, data in records:
-            source_kind = self._kind_from_path(path)
-            if not source_kind:
-                continue
+        for path, relative_path, env, source_kind, source_name, data in records:
             source_id = make_node_id("stonebranch", env, source_kind, source_name)
-
-            for ref in self._find_references(data):
-                ref_value, native_relation, relation, evidence_path, evidence_key = ref
-                relation = self._normalized_relation_for_source(native_relation, source_kind, evidence_key)
+            for ref_value, native_relation, relation, evidence_path, evidence_key, evidence_value in self._find_references(data, source_kind):
                 target_kind = self._kind_from_relation(native_relation, relation)
-                target_name = self._target_name_for_relation(ref_value, native_relation, relation)
                 target_id = self._resolve_or_create_ref_node(
                     graph=graph,
                     registry=registry,
                     env=env,
                     target_kind=target_kind,
-                    target_name=target_name,
+                    target_name=ref_value,
                     native_relation=native_relation,
                     source_file=relative_path,
                 )
-                if not target_id:
-                    continue
-
                 edge = Edge(
                     id=make_edge_id(source_id, target_id, relation, native_relation),
                     source=source_id,
@@ -108,7 +97,7 @@ class StonebranchJsonParser:
                     evidence_file=relative_path,
                     evidence_path=evidence_path,
                     evidence_key=evidence_key,
-                    evidence_value=redacted_preview(ref_value, self.config.max_evidence_value_len),
+                    evidence_value=redacted_preview(evidence_value, self.config.max_evidence_value_len),
                     confidence=0.95 if native_relation != "deep_scan_reference" else 0.55,
                 )
                 graph.add_edge(edge)
@@ -119,18 +108,15 @@ class StonebranchJsonParser:
     def _load_json_files(self, input_path: Path) -> list[tuple[Path, str, dict[str, Any]]]:
         if not input_path.exists():
             raise FileNotFoundError(f"Input path does not exist: {input_path}")
-
         root = input_path.parent if input_path.is_file() else input_path
         if input_path.is_file():
             files = [input_path]
         else:
             ignored = set(self.config.ignored_filenames)
             files = sorted(
-                p
-                for p in input_path.rglob("*.json")
+                p for p in input_path.rglob("*.json")
                 if p.name not in ignored and not p.name.startswith(".") and "__pycache__" not in p.parts
             )
-
         loaded = []
         for file in files:
             try:
@@ -168,7 +154,6 @@ class StonebranchJsonParser:
                 return value.strip()
         return None
 
-
     def _detect_object_name(self, data: dict[str, Any], kind: str, path: Path) -> str:
         kind_specific_keys = {
             "task": ("name", "Name", "title", "Title", "taskName", "TaskName"),
@@ -182,14 +167,13 @@ class StonebranchJsonParser:
             "script": ("name", "Name", "title", "Title", "scriptName", "ScriptName"),
             "email_template": ("name", "Name", "title", "Title", "emailTemplateName", "EmailTemplateName"),
         }
-        value = first_string(data, kind_specific_keys.get(kind, ("name", "Name", "title", "Title")))
-        return value or path.stem
+        return first_string(data, kind_specific_keys.get(kind, ("name", "Name", "title", "Title"))) or path.stem
 
     def _object_metadata(self, data: dict[str, Any]) -> dict[str, Any]:
-        command = data.get("command") or data.get("Command") or data.get("script") or data.get("Script")
         metadata = {"json_keys": sorted(str(k) for k in data.keys())}
+        command = data.get("command") or data.get("Command") or data.get("script") or data.get("Script")
         if isinstance(command, str) and command.strip():
-            metadata["command_hash"] = stable_hash(" ".join(command.split()), 16)
+            metadata["command_hash"] = command_hash(command)
         return metadata
 
     def _make_node(
@@ -203,7 +187,6 @@ class StonebranchJsonParser:
         attributes: dict[str, Any] | None = None,
     ) -> Node:
         safe_attrs = safe_metadata(attributes or {})
-        attributes_hash = stable_hash(safe_attrs, 16) if safe_attrs else ""
         return Node(
             id=make_node_id("stonebranch", env, kind, name),
             canonical_key=make_canonical_key(env, kind, name),
@@ -213,19 +196,21 @@ class StonebranchJsonParser:
             name=name,
             native_kind=native_kind,
             source_file=source_file,
-            attributes_hash=attributes_hash,
+            attributes_hash=stable_hash(safe_attrs, 16) if safe_attrs else "",
             metadata=metadata,
         )
 
-    def _build_registry(self, graph: Graph) -> dict[tuple[str, str], str]:
-        registry: dict[tuple[str, str], str] = {}
+    def _build_registry(self, graph: Graph) -> dict[str, dict]:
+        by_kind: dict[tuple[str, str, str], str] = {}
+        by_name: dict[tuple[str, str], set[str]] = {}
         for node in graph.nodes.values():
-            registry[(node.env, node.name.lower())] = node.id
-            registry[(node.env, node.canonical_key.lower())] = node.id
-        return registry
+            name_key = node.name.lower()
+            by_kind[(node.env, node.kind, name_key)] = node.id
+            by_name.setdefault((node.env, name_key), set()).add(node.id)
+        return {"by_kind": by_kind, "by_name": by_name}
 
-    def _find_references(self, data: dict[str, Any]) -> list[tuple[str, str, str, str, str]]:
-        refs: list[tuple[str, str, str, str, str]] = []
+    def _find_references(self, data: dict[str, Any], source_kind: str) -> list[tuple[str, str, str, str, str, str]]:
+        refs: list[tuple[str, str, str, str, str, str]] = []
 
         def walk(value: Any, path: str, key: str) -> None:
             if isinstance(value, dict):
@@ -233,95 +218,65 @@ class StonebranchJsonParser:
                     child_key_str = str(child_key)
                     walk(child, f"{path}.{child_key_str}", child_key_str)
                 return
-
             if isinstance(value, list):
                 for idx, child in enumerate(value):
                     walk(child, f"{path}[{idx}]", key)
                 return
-
             if not isinstance(value, str) or not value.strip() or is_secret_key(key):
                 return
-
             cleaned = value.strip()
-            native = self._native_relation_from_key(key)
+            native = self._native_relation_from_key(key, source_kind)
             if native:
-                refs.append((cleaned, native, self._normalized_relation(native), path, key))
-
+                relation = self._normalized_relation(native)
+                if relation == "runs_command":
+                    command_id = command_hash(cleaned)
+                    evidence = command_evidence(cleaned, include_raw_values=self.config.include_raw_values)
+                    refs.append((command_id, native, relation, path, key, evidence))
+                else:
+                    refs.append((cleaned, native, relation, path, key, cleaned))
             for token in self._extract_variable_tokens(cleaned):
-                refs.append((token, "variable_token", "uses_variable", path, key))
-
+                refs.append((token, "variable_token", "uses_variable", path, key, token))
             if self.deep_scan and not native and self._likely_reference(cleaned):
-                refs.append((cleaned, "deep_scan_reference", "references", path, key))
+                refs.append((cleaned, "deep_scan_reference", "references", path, key, cleaned))
 
         walk(data, "$", "")
         return refs
 
-    def _native_relation_from_key(self, key: str) -> str | None:
+    def _native_relation_from_key(self, key: str, source_kind: str) -> str | None:
         lower = key.lower().replace("-", "_")
-        compact = lower.replace("_", "")
-
-        exact_map = {
-            "taskname": "references_task",
-            "tasks": "references_task",
-            "workflowname": "references_workflow",
-            "workflows": "references_workflow",
-            "jobname": "references_job",
-            "jobs": "references_job",
-            "variablename": "references_variable",
-            "variables": "references_variable",
-            "calendarname": "references_calendar",
-            "calendar": "references_calendar",
-            "calendars": "references_calendar",
-            "credentialname": "references_credential",
-            "credential": "references_credential",
-            "credentials": "references_credential",
-            "connectionname": "references_connection",
-            "connection": "references_connection",
-            "connections": "references_connection",
-            "agentname": "references_agent",
-            "agent": "references_agent",
-            "agents": "references_agent",
+        if source_kind == "trigger" and lower in {"taskname", "task_name", "workflowname", "workflow_name"}:
+            return "references_trigger"
+        exact = {
+            "predecessortask": "references_predecessor",
+            "predecessor_task": "references_predecessor",
+            "successortask": "references_successor",
+            "successor_task": "references_successor",
             "agentclustername": "references_agent_cluster",
-            "agentcluster": "references_agent_cluster",
-            "scriptname": "references_script",
-            "script": "references_script",
+            "agent_cluster_name": "references_agent_cluster",
             "emailtemplatename": "references_email_template",
-            "emailtemplate": "references_email_template",
-            "triggername": "references_trigger",
-            "trigger": "references_trigger",
+            "email_template_name": "references_email_template",
+            "calendarname": "references_calendar",
+            "calendar_name": "references_calendar",
+            "credentialname": "references_credential",
+            "credential_name": "references_credential",
+            "connectionname": "references_connection",
+            "connection_name": "references_connection",
+            "agentname": "references_agent",
+            "agent_name": "references_agent",
+            "scriptname": "references_script",
+            "script_name": "references_script",
+            "variablename": "references_variable",
+            "variable_name": "references_variable",
             "command": "references_command",
-            "cmd": "references_command",
         }
-        if compact in exact_map:
-            return exact_map[compact]
-
-        if "predecessor" in compact:
-            return "references_predecessor"
-        if "successor" in compact:
-            return "references_successor"
-        if compact.endswith("task") or compact.endswith("taskname"):
+        if lower in exact:
+            return exact[lower]
+        if lower.endswith("taskname") or lower.endswith("task_name"):
             return "references_task"
-        if compact.endswith("calendar") or compact.endswith("calendarname"):
-            return "references_calendar"
-        if compact.endswith("agent") or compact.endswith("agentname"):
-            return "references_agent"
         return None
 
     def _normalized_relation(self, native_relation: str) -> str:
-        aliases = self.config.relation_aliases or {}
-        return aliases.get(native_relation, native_relation)
-
-    def _normalized_relation_for_source(self, native_relation: str, source_kind: str, evidence_key: str) -> str:
-        if native_relation == "variable_token":
-            return "uses_variable"
-        if source_kind == "trigger" and native_relation in {"references_task", "references_workflow", "references_job"}:
-            return "starts"
-        return self._normalized_relation(native_relation)
-
-    def _target_name_for_relation(self, value: str, native_relation: str, relation: str) -> str:
-        if relation == "runs_command" or native_relation == "references_command":
-            return stable_hash(" ".join(value.split()), 16)
-        return value
+        return (self.config.relation_aliases or {}).get(native_relation, native_relation)
 
     def _extract_variable_tokens(self, value: str) -> list[str]:
         found: list[str] = []
@@ -332,11 +287,7 @@ class StonebranchJsonParser:
         return found
 
     def _likely_reference(self, value: str) -> bool:
-        if len(value) > 220 or "\n" in value:
-            return False
-        if " " in value and not any(sep in value for sep in ("_", "-", "/", ":")):
-            return False
-        return True
+        return len(value) <= 220 and "\n" not in value and not (" " in value and not any(sep in value for sep in ("_", "-", "/", ":")))
 
     def _kind_from_relation(self, native_relation: str, relation: str) -> str:
         text = (native_relation + " " + relation).lower()
@@ -352,32 +303,42 @@ class StonebranchJsonParser:
             return "agent"
         if "email_template" in text or "emailtemplate" in text:
             return "email_template"
-        if "command" in text:
-            return "command"
         if "script" in text:
             return "script"
         if "variable" in text:
             return "variable"
         if "trigger" in text:
             return "trigger"
+        if "command" in text:
+            return "command"
         if "task" in text or "job" in text or "predecessor" in text or "successor" in text:
             return "task"
         return "object"
 
+    def _lookup_registry(self, registry: dict[str, dict], env: str, kind: str, name: str) -> str | None:
+        name_key = name.lower()
+        by_kind = registry["by_kind"]
+        exact = by_kind.get((env, kind, name_key))
+        if exact:
+            return exact
+        matches = registry["by_name"].get((env, name_key), set())
+        if len(matches) == 1:
+            return next(iter(matches))
+        return None
+
     def _resolve_or_create_ref_node(
         self,
         graph: Graph,
-        registry: dict[tuple[str, str], str],
+        registry: dict[str, dict],
         env: str,
         target_kind: str,
         target_name: str,
         native_relation: str,
         source_file: str,
     ) -> str:
-        key = (env, target_name.lower())
-        if key in registry:
-            return registry[key]
-
+        existing = self._lookup_registry(registry, env, target_kind, target_name)
+        if existing:
+            return existing
         node = self._make_node(
             env=env,
             kind=target_kind,
@@ -388,7 +349,8 @@ class StonebranchJsonParser:
             attributes=None,
         )
         graph.add_node(node)
-        registry[(env, target_name.lower())] = node.id
+        registry["by_kind"][(env, target_kind, target_name.lower())] = node.id
+        registry["by_name"].setdefault((env, target_name.lower()), set()).add(node.id)
         return node.id
 
     def _add_warnings(self, graph: Graph) -> None:

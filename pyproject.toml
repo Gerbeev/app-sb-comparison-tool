@@ -1,6 +1,6 @@
 [project]
 name = "stonebranch-dependency-tool"
-version = "0.3.2"
+version = "0.5.1"
 description = "Build and compare dependency graphs from Stonebranch JSON exports and AutoSys JIL files."
 requires-python = ">=3.11"
 dependencies = []
