@@ -1,5 +1,17 @@
 # Changelog
 
+### S1 (semantic matching correctness)
+
+- Added structural parsing of Stonebranch workflow `workflowVertices`/`workflowEdges` (`parsers/stonebranch_workflow.py`): vertices become `contains` edges, workflow edges become `depends_on_success`/`depends_on_failure`/`depends_on_done` dependencies (dependent -> prerequisite, matching AutoSys condition direction). Previously edge endpoints (`sourceId.taskName`/`targetId.taskName`) were misread as containment references and the dependencies themselves were lost, inflating both Stonebranch-extra edges and "missing dependency" findings.
+- Restricted Stonebranch variable-token extraction (`${...}`, `%...%`, `{{...}}`, `@(...)`) to command-like fields (command/script/parameters/args), matching the JIL parser which extracts variables from the command attribute only. Tokens in descriptions, log paths, and layout data no longer create synthetic variable nodes and `uses_variable` edges.
+- Task-typed Stonebranch references (trigger `taskName`, workflow vertices/edges, predecessor/successor) now resolve to an existing workflow node when no task with that name exists (and vice versa), mirroring the JIL parser's task/box/file_watcher resolution. This removes synthetic duplicate nodes and false key mismatches.
+- Unified `agent_cluster`/`agent` kinds and `runs_on_cluster`/`runs_on` relations for comparison keys (like `workflow`/`box`): AutoSys machines migrated to agent clusters with the same name now match.
+- Added relaxed dependency matching: a generic `depends_on` on one side now matches a specific `depends_on_*` between the same objects on the other side, reported in `edges.matched_relaxed` with a `relaxed_dependency_matches` summary counter and an explicit verification risk instead of two false "missing dependency" rows. Success-vs-failure conflicts remain mismatches.
+- Stonebranch-only object kinds (trigger, credential, connection, script, email_template) and relations (starts, uses_credential, uses_connection, uses_email_template, runs_script, references) are now reported in informational `stonebranch_only` buckets and no longer counted as `missing_in_jil` mismatches or readiness penalties. Match rates use comparable totals.
+- Edges that normalize to the same comparison key on one side (duplicate evidence such as `tasks` list + `workflowVertices` + task `workflowName`) now keep a deterministic representative for matching instead of being dropped as collisions, removing false "missing dependency" findings; the collision diagnostics remain.
+- Fixed latent `NameError`s in `compare_keys.py` (missing `re` and `KIND_OBJECT` imports) that crashed comparison when `name_rewrites` mapping rules or non-standard canonical keys were used.
+- Moved diff-set computation into `compare_matching.py`; extended `report.md`, `comparison.json`, and `diff-index.json` with relaxed-match and Stonebranch-only sections.
+
 ### R1
 
 - Split AutoSys parser responsibilities into focused helper modules for parsed job records, JIL lexing, condition parsing, and JIL node construction while keeping `stonebranch_graph.parsers.autosys_jil.AutosysJilParser` as the public entry point.
