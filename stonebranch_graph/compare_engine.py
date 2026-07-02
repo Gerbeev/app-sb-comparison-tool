@@ -4,16 +4,11 @@ from typing import Any
 
 from .config import AnalyzerConfig, MappingConfig
 from .core import Edge, Graph, Node
-from .domain import (
-    DEPENDENCY_RELATIONS,
-    REL_CONTAINS,
-    REL_DEPENDS_ON,
-    STONEBRANCH_ONLY_KINDS,
-    STONEBRANCH_ONLY_RELATIONS,
-)
+from .domain import REL_CONTAINS
 from .metrics import compute_comparison_metrics, metrics_to_dict
 from .comparison_model import Comparison, SideComparisonIndex
-from .compare_keys import comparison_edge_key, comparison_node_key, edge_key_parts
+from .compare_keys import comparison_edge_key, comparison_node_key
+from .compare_matching import DiffSets, compute_diff_sets, diff_summary_extras, relaxed_edge_pair_payload
 from .compare_diagnostics import collision_payload, edge_collision_payload, unused_mapping_payload
 from .compare_payloads import (
     command_difference_payload,
@@ -31,142 +26,19 @@ def compare_graphs(stonebranch: Graph, jil: Graph, mapping: MappingConfig, confi
     mapping_usage: set[str] = set()
     sb = build_side_indexes(stonebranch, mapping, left=True, mapping_usage=mapping_usage)
     jl = build_side_indexes(jil, mapping, left=False, mapping_usage=mapping_usage)
+    diff = compute_diff_sets(sb, jl)
 
-    matched_keys = sb.node_keys & jl.node_keys
-    missing_in_sb = sorted(jl.node_keys - sb.node_keys)
-    # Stonebranch-only object kinds (triggers, credentials, ...) cannot exist in
-    # JIL, so they are informational rather than migration mismatches.
-    missing_in_jil, sb_only_node_keys = partition_stonebranch_only_nodes(
-        sorted(sb.node_keys - jl.node_keys), sb.node_index
-    )
-
-    matched_edge_keys = sb.edge_keys & jl.edge_keys
-    missing_edges_in_sb = sorted(jl.edge_keys - sb.edge_keys)
-    missing_edges_in_jil = sorted(sb.edge_keys - jl.edge_keys)
-    # A generic depends_on on one side matches a specific depends_on_* between
-    # the same objects on the other side: it is the same dependency with an
-    # unspecified condition, not a lost edge.
-    relaxed_pairs, missing_edges_in_jil, missing_edges_in_sb = match_relaxed_dependency_edges(
-        missing_edges_in_jil, missing_edges_in_sb
-    )
-    missing_edges_in_jil, sb_only_edge_keys = partition_stonebranch_only_edges(missing_edges_in_jil)
-
-    attributes = compare_matched_attributes(matched_keys, sb.node_index, jl.node_index)
-    nodes = build_node_diff_payloads(matched_keys, missing_in_sb, missing_in_jil, sb.node_index, jl.node_index)
-    nodes["stonebranch_only"] = [node_payload_with_key(sb.node_index[key], key) for key in sb_only_node_keys]
-    edges = build_edge_diff_payloads(
-        matched_edge_keys,
-        missing_edges_in_sb,
-        missing_edges_in_jil,
-        sb.edge_index,
-        jl.edge_index,
-        stonebranch,
-        jil,
-    )
-    edges["matched_relaxed"] = [
-        relaxed_edge_pair_payload(sb.edge_index[sb_key], jl.edge_index[jil_key], stonebranch, jil, sb_key, jil_key)
-        for sb_key, jil_key in relaxed_pairs
-    ]
-    edges["stonebranch_only"] = [edge_payload(sb.edge_index[key], stonebranch, comparison_key=key) for key in sb_only_edge_keys]
+    attributes = compare_matched_attributes(diff.matched_keys, sb.node_index, jl.node_index)
+    nodes = build_node_diff_payloads(diff, sb.node_index, jl.node_index)
+    edges = build_edge_diff_payloads(diff, sb, jl, stonebranch, jil)
     diagnostics = build_diagnostics(sb, jl, mapping, mapping_usage)
-    summary = build_summary(stonebranch, jil, matched_keys, missing_in_sb, missing_in_jil, matched_edge_keys, missing_edges_in_sb, missing_edges_in_jil, attributes, diagnostics)
-    summary["relaxed_dependency_matches"] = len(relaxed_pairs)
-    summary["stonebranch_only_nodes"] = len(sb_only_node_keys)
-    summary["stonebranch_only_edges"] = len(sb_only_edge_keys)
-    summary["stonebranch_comparable_nodes"] = summary["stonebranch_nodes"] - len(sb_only_node_keys)
-    summary["stonebranch_comparable_edges"] = summary["stonebranch_edges"] - len(sb_only_edge_keys)
+    summary = build_summary(stonebranch, jil, diff, attributes, diagnostics)
+    summary.update(diff_summary_extras(diff, len(stonebranch.nodes), len(stonebranch.edges)))
     summary.update(metrics_to_dict(compute_comparison_metrics(summary, nodes, edges, attributes, stonebranch, jil)))
 
     comparison = Comparison(summary=summary, nodes=nodes, edges=edges, attributes=attributes, diagnostics=diagnostics)
     comparison.risks = build_risks(comparison)
     return comparison
-
-
-def partition_stonebranch_only_nodes(
-    missing_in_jil: list[str],
-    sb_node_index: dict[str, Node],
-) -> tuple[list[str], list[str]]:
-    comparable: list[str] = []
-    stonebranch_only: list[str] = []
-    for key in missing_in_jil:
-        node = sb_node_index.get(key)
-        if node is not None and node.kind in STONEBRANCH_ONLY_KINDS:
-            stonebranch_only.append(key)
-        else:
-            comparable.append(key)
-    return comparable, stonebranch_only
-
-
-def partition_stonebranch_only_edges(missing_in_jil: list[str]) -> tuple[list[str], list[str]]:
-    comparable: list[str] = []
-    stonebranch_only: list[str] = []
-    for key in missing_in_jil:
-        parts = edge_key_parts(key)
-        if parts is not None and parts[1] in STONEBRANCH_ONLY_RELATIONS:
-            stonebranch_only.append(key)
-        else:
-            comparable.append(key)
-    return comparable, stonebranch_only
-
-
-def match_relaxed_dependency_edges(
-    missing_edges_in_jil: list[str],
-    missing_edges_in_sb: list[str],
-) -> tuple[list[tuple[str, str]], list[str], list[str]]:
-    """Pair generic depends_on edges with specific depends_on_* counterparts.
-
-    Returns (matched (sb_key, jil_key) pairs, remaining sb-extra keys,
-    remaining jil-extra keys). Only pairs where one side is the generic
-    depends_on are matched; success-vs-failure style conflicts remain
-    mismatches.
-    """
-    jil_by_endpoints: dict[tuple[str, str], list[tuple[str, str]]] = {}
-    for key in missing_edges_in_sb:
-        parts = edge_key_parts(key)
-        if parts is None or parts[1] not in DEPENDENCY_RELATIONS:
-            continue
-        jil_by_endpoints.setdefault((parts[0], parts[2]), []).append((parts[1], key))
-
-    pairs: list[tuple[str, str]] = []
-    matched_sb: set[str] = set()
-    matched_jil: set[str] = set()
-    for sb_key in missing_edges_in_jil:
-        parts = edge_key_parts(sb_key)
-        if parts is None or parts[1] not in DEPENDENCY_RELATIONS:
-            continue
-        sb_relation = parts[1]
-        candidates = jil_by_endpoints.get((parts[0], parts[2]), [])
-        for jil_relation, jil_key in sorted(candidates, key=lambda item: item[1]):
-            if jil_key in matched_jil:
-                continue
-            if REL_DEPENDS_ON not in (sb_relation, jil_relation):
-                continue
-            pairs.append((sb_key, jil_key))
-            matched_sb.add(sb_key)
-            matched_jil.add(jil_key)
-            break
-
-    remaining_sb_extra = [key for key in missing_edges_in_jil if key not in matched_sb]
-    remaining_jil_extra = [key for key in missing_edges_in_sb if key not in matched_jil]
-    return pairs, remaining_sb_extra, remaining_jil_extra
-
-
-def relaxed_edge_pair_payload(
-    sb_edge: Edge,
-    jil_edge: Edge,
-    stonebranch: Graph,
-    jil: Graph,
-    sb_key: str,
-    jil_key: str,
-) -> dict[str, Any]:
-    return {
-        "key": jil_key,
-        "match_type": "dependency_family_relaxed",
-        "stonebranch_key": sb_key,
-        "jil_key": jil_key,
-        "stonebranch": edge_payload(sb_edge, stonebranch, comparison_key=sb_key),
-        "jil": edge_payload(jil_edge, jil, comparison_key=jil_key),
-    }
 
 
 def build_side_indexes(graph: Graph, mapping: MappingConfig, left: bool, mapping_usage: set[str]) -> SideComparisonIndex:
@@ -221,35 +93,37 @@ def compare_matched_attributes(matched_keys: set[str], sb_nodes: dict[str, Node]
 
 
 def build_node_diff_payloads(
-    matched_keys: set[str],
-    missing_in_sb: list[str],
-    missing_in_jil: list[str],
+    diff: DiffSets,
     sb_nodes: dict[str, Node],
     jil_nodes: dict[str, Node],
 ) -> dict[str, list[dict[str, Any]]]:
     return {
-        "matched": [node_pair_payload(sb_nodes[key], jil_nodes[key], comparison_key=key) for key in sorted(matched_keys)],
-        "missing_in_stonebranch": [node_payload_with_key(jil_nodes[key], key) for key in missing_in_sb],
-        "missing_in_jil": [node_payload_with_key(sb_nodes[key], key) for key in missing_in_jil],
+        "matched": [node_pair_payload(sb_nodes[key], jil_nodes[key], comparison_key=key) for key in sorted(diff.matched_keys)],
+        "missing_in_stonebranch": [node_payload_with_key(jil_nodes[key], key) for key in diff.missing_in_sb],
+        "missing_in_jil": [node_payload_with_key(sb_nodes[key], key) for key in diff.missing_in_jil],
+        "stonebranch_only": [node_payload_with_key(sb_nodes[key], key) for key in diff.sb_only_node_keys],
     }
 
 
 def build_edge_diff_payloads(
-    matched_edge_keys: set[str],
-    missing_edges_in_sb: list[str],
-    missing_edges_in_jil: list[str],
-    sb_edges: dict[str, Edge],
-    jil_edges: dict[str, Edge],
+    diff: DiffSets,
+    sb: SideComparisonIndex,
+    jl: SideComparisonIndex,
     stonebranch: Graph,
     jil: Graph,
 ) -> dict[str, list[dict[str, Any]]]:
     return {
         "matched": [
-            edge_pair_payload(sb_edges[key], jil_edges[key], stonebranch, jil, comparison_key=key)
-            for key in sorted(matched_edge_keys)
+            edge_pair_payload(sb.edge_index[key], jl.edge_index[key], stonebranch, jil, comparison_key=key)
+            for key in sorted(diff.matched_edge_keys)
         ],
-        "missing_in_stonebranch": [edge_payload(jil_edges[key], jil, comparison_key=key) for key in missing_edges_in_sb],
-        "missing_in_jil": [edge_payload(sb_edges[key], stonebranch, comparison_key=key) for key in missing_edges_in_jil],
+        "matched_relaxed": [
+            relaxed_edge_pair_payload(sb.edge_index[sb_key], jl.edge_index[jil_key], stonebranch, jil, sb_key, jil_key)
+            for sb_key, jil_key in diff.relaxed_pairs
+        ],
+        "missing_in_stonebranch": [edge_payload(jl.edge_index[key], jil, comparison_key=key) for key in diff.missing_edges_in_sb],
+        "missing_in_jil": [edge_payload(sb.edge_index[key], stonebranch, comparison_key=key) for key in diff.missing_edges_in_jil],
+        "stonebranch_only": [edge_payload(sb.edge_index[key], stonebranch, comparison_key=key) for key in diff.sb_only_edge_keys],
     }
 
 
@@ -266,26 +140,21 @@ def build_diagnostics(sb: SideComparisonIndex, jl: SideComparisonIndex, mapping:
 def build_summary(
     stonebranch: Graph,
     jil: Graph,
-    matched_keys: set[str],
-    missing_in_sb: list[str],
-    missing_in_jil: list[str],
-    matched_edge_keys: set[str],
-    missing_edges_in_sb: list[str],
-    missing_edges_in_jil: list[str],
+    diff: DiffSets,
     attributes: dict[str, list[dict[str, Any]]],
     diagnostics: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
     return {
         "stonebranch_nodes": len(stonebranch.nodes),
         "jil_nodes": len(jil.nodes),
-        "matched_nodes": len(matched_keys),
-        "missing_in_stonebranch": len(missing_in_sb),
-        "missing_in_jil": len(missing_in_jil),
+        "matched_nodes": len(diff.matched_keys),
+        "missing_in_stonebranch": len(diff.missing_in_sb),
+        "missing_in_jil": len(diff.missing_in_jil),
         "stonebranch_edges": len(stonebranch.edges),
         "jil_edges": len(jil.edges),
-        "matched_edges": len(matched_edge_keys),
-        "missing_edges_in_stonebranch": len(missing_edges_in_sb),
-        "missing_edges_in_jil": len(missing_edges_in_jil),
+        "matched_edges": len(diff.matched_edge_keys),
+        "missing_edges_in_stonebranch": len(diff.missing_edges_in_sb),
+        "missing_edges_in_jil": len(diff.missing_edges_in_jil),
         "changed_attributes": len(attributes.get("changed", [])),
         "command_differences": len(attributes.get("command_differences", [])),
         "command_syntax_diff_only": count_command_differences_by_status(attributes, "command_syntax_diff_only"),

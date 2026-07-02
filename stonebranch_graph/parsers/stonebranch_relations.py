@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 from typing import Any
 
 from stonebranch_graph.config import AnalyzerConfig
@@ -22,8 +21,6 @@ from stonebranch_graph.domain import (
     KIND_WORKFLOW,
     REL_CONTAINS,
     REL_DEPENDS_ON,
-    REL_DEPENDS_ON_DONE,
-    REL_DEPENDS_ON_FAILURE,
     REL_DEPENDS_ON_SUCCESS,
     REL_REFERENCES,
     REL_RUNS_COMMAND,
@@ -40,6 +37,7 @@ from stonebranch_graph.domain import (
     REL_WATCHES_FILE,
 )
 from stonebranch_graph.normalizers import command_evidence, semantic_command_hash
+from stonebranch_graph.parsers.stonebranch_workflow import WORKFLOW_STRUCTURE_KEYS, normalized_json_key
 from stonebranch_graph.utils import is_secret_key
 
 VAR_TOKEN_RE = re.compile(
@@ -100,28 +98,6 @@ TARGET_KIND_BY_RELATION = {
 
 ReferenceTuple = tuple[str, str, str, str, str, str]
 
-# Keys of Stonebranch workflow JSON subtrees that describe the workflow graph
-# structure (vertices and dependency edges). They are parsed structurally by
-# extract_workflow_structure and must be skipped by the generic key-based
-# reference walker: otherwise every dependency edge endpoint (sourceId.taskName /
-# targetId.taskName) is misread as a containment reference and the dependency
-# itself is lost.
-WORKFLOW_VERTEX_CONTAINER_KEYS = {"workflowvertices", "workflow_vertices", "vertices"}
-WORKFLOW_EDGE_CONTAINER_KEYS = {"workflowedges", "workflow_edges", "edges"}
-WORKFLOW_STRUCTURE_KEYS = WORKFLOW_VERTEX_CONTAINER_KEYS | WORKFLOW_EDGE_CONTAINER_KEYS
-
-# Universal Controller workflow edge condition -> normalized dependency relation.
-# Matches the AutoSys JIL condition families: s() / f() / d().
-WORKFLOW_EDGE_CONDITION_RELATIONS = {
-    "success": REL_DEPENDS_ON_SUCCESS,
-    "failure": REL_DEPENDS_ON_FAILURE,
-    "success/failure": REL_DEPENDS_ON_DONE,
-    "success or failure": REL_DEPENDS_ON_DONE,
-    "finished": REL_DEPENDS_ON_DONE,
-    "done": REL_DEPENDS_ON_DONE,
-    "completed": REL_DEPENDS_ON_DONE,
-}
-
 # Variable tokens are only meaningful references inside command-like values.
 # Extracting ${...}/%...% tokens from descriptions, file paths, or layout data
 # inflates the graph with synthetic variables that AutoSys JIL can never have
@@ -138,153 +114,6 @@ VARIABLE_TOKEN_SOURCE_KEYS = {
     "args",
     "arguments",
 }
-
-
-@dataclass(frozen=True)
-class WorkflowDependency:
-    predecessor: str
-    successor: str
-    relation: str
-    condition: str
-    evidence_path: str
-
-
-@dataclass(frozen=True)
-class WorkflowStructure:
-    vertex_tasks: list[tuple[str, str]] = field(default_factory=list)
-    dependencies: list[WorkflowDependency] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-
-
-def normalized_json_key(key: str) -> str:
-    return str(key).lower().replace("-", "_")
-
-
-def _string_from(value: Any, keys: tuple[str, ...]) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, dict):
-        for key in keys:
-            inner = value.get(key)
-            if isinstance(inner, str) and inner.strip():
-                return inner.strip()
-    return ""
-
-
-def _vertex_task_name(item: Any) -> str:
-    if isinstance(item, str):
-        return item.strip()
-    if not isinstance(item, dict):
-        return ""
-    task = item.get("task")
-    name = _string_from(task, ("value", "name", "taskName"))
-    if name:
-        return name
-    return _string_from(item, ("taskName", "task_name", "name"))
-
-
-def _vertex_id(item: Any) -> str:
-    if not isinstance(item, dict):
-        return ""
-    for key in ("vertexId", "vertex_id", "id"):
-        value = item.get(key)
-        if isinstance(value, (str, int)) and str(value).strip():
-            return str(value).strip()
-    return ""
-
-
-def _endpoint_task_name(value: Any, vertex_map: dict[str, str]) -> str:
-    if isinstance(value, dict):
-        name = _string_from(value, ("taskName", "task_name"))
-        if name:
-            return name
-        if "value" in value:
-            return _endpoint_task_name(value.get("value"), vertex_map)
-        return ""
-    token = str(value).strip() if value is not None else ""
-    if not token:
-        return ""
-    if token in vertex_map:
-        return vertex_map[token]
-    if token.isdigit():
-        return ""
-    return token
-
-
-def _edge_condition_label(item: dict[str, Any]) -> str:
-    condition = item.get("condition")
-    if isinstance(condition, dict):
-        condition = condition.get("value") or condition.get("name") or ""
-    return str(condition or "").strip()
-
-
-def workflow_edge_condition_relation(condition: str) -> str:
-    label = condition.strip().lower()
-    if not label:
-        # Universal Controller edges default to a Success condition.
-        return REL_DEPENDS_ON_SUCCESS
-    return WORKFLOW_EDGE_CONDITION_RELATIONS.get(label, REL_DEPENDS_ON)
-
-
-def extract_workflow_structure(data: dict[str, Any]) -> WorkflowStructure:
-    """Parse workflowVertices/workflowEdges into containment and dependencies.
-
-    Vertices become workflow-contains-task references. Edges become
-    successor-depends-on-predecessor dependencies with the edge condition mapped
-    to the same relation family as AutoSys JIL conditions.
-    """
-    if not isinstance(data, dict):
-        return WorkflowStructure()
-
-    vertex_items: list[tuple[str, Any]] = []
-    edge_items: list[tuple[str, Any]] = []
-    for key, value in data.items():
-        normalized = normalized_json_key(key)
-        if not isinstance(value, list):
-            continue
-        if normalized in WORKFLOW_VERTEX_CONTAINER_KEYS:
-            vertex_items.extend((f"$.{key}[{idx}]", item) for idx, item in enumerate(value))
-        elif normalized in WORKFLOW_EDGE_CONTAINER_KEYS:
-            edge_items.extend((f"$.{key}[{idx}]", item) for idx, item in enumerate(value))
-
-    vertex_tasks: list[tuple[str, str]] = []
-    vertex_map: dict[str, str] = {}
-    warnings: list[str] = []
-    for path, item in vertex_items:
-        task_name = _vertex_task_name(item)
-        if not task_name:
-            warnings.append(f"Workflow vertex without a resolvable task name at {path}.")
-            continue
-        vertex_tasks.append((task_name, path))
-        vertex_id = _vertex_id(item)
-        if vertex_id:
-            vertex_map[vertex_id] = task_name
-
-    dependencies: list[WorkflowDependency] = []
-    for path, item in edge_items:
-        if not isinstance(item, dict):
-            continue
-        source_value = item.get("sourceId", item.get("source", item.get("source_id")))
-        target_value = item.get("targetId", item.get("target", item.get("target_id")))
-        predecessor = _endpoint_task_name(source_value, vertex_map)
-        successor = _endpoint_task_name(target_value, vertex_map)
-        if not predecessor or not successor:
-            warnings.append(f"Workflow edge with unresolvable endpoint at {path}.")
-            continue
-        if predecessor == successor:
-            continue
-        condition = _edge_condition_label(item)
-        dependencies.append(
-            WorkflowDependency(
-                predecessor=predecessor,
-                successor=successor,
-                relation=workflow_edge_condition_relation(condition),
-                condition=condition or "Success",
-                evidence_path=path,
-            )
-        )
-
-    return WorkflowStructure(vertex_tasks=vertex_tasks, dependencies=dependencies, warnings=warnings)
 
 
 def find_stonebranch_references(
