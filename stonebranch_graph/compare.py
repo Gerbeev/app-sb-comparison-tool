@@ -8,14 +8,27 @@ from typing import Any
 from .config import AnalyzerConfig, MappingConfig
 from .core import Edge, Graph, Node, enterprise_name_parts, comparison_name, normalize_name
 from .domain import (
+    ARTIFACT_EDGE_RELATIONS,
+    ARTIFACT_NODE_KINDS,
+    COMPARABLE_EDGE_RELATIONS,
+    INFRASTRUCTURE_KINDS,
+    JOB_LIKE_KINDS,
+    KIND_AGENT,
+    KIND_AGENT_CLUSTER,
     KIND_BOX,
+    KIND_FILE_WATCHER,
     KIND_OBJECT,
+    KIND_TASK,
     KIND_WORKFLOW,
     KNOWN_SOURCE_SYSTEMS,
+    ONE_SIDED_EDGE_RELATIONS,
     PACK_CRITICAL_RELATIONS,
     REL_CONTAINS,
     REL_DEPENDS_ON_SUCCESS,
+    REL_RUNS_ON,
+    REL_RUNS_ON_CLUSTER,
     REL_SUCCESSOR_OF,
+    SYSTEM_SPECIFIC_KINDS,
 )
 from .exporters import export_csv_rows, write_json
 from .metrics import compute_comparison_metrics, metric_rows, metrics_to_dict
@@ -43,12 +56,19 @@ class Comparison:
 
 def compare_graphs(stonebranch: Graph, jil: Graph, mapping: MappingConfig, config: AnalyzerConfig) -> Comparison:
     mapping_usage: set[str] = set()
-    sb = build_side_indexes(stonebranch, mapping, left=True, mapping_usage=mapping_usage)
+    env_map = build_env_map(stonebranch, jil)
+    sb = build_side_indexes(stonebranch, mapping, left=True, mapping_usage=mapping_usage, env_map=env_map)
     jl = build_side_indexes(jil, mapping, left=False, mapping_usage=mapping_usage)
 
-    matched_keys = sb.node_keys & jl.node_keys
-    missing_in_sb = sorted(jl.node_keys - sb.node_keys)
-    missing_in_jil = sorted(sb.node_keys - jl.node_keys)
+    # Job-like objects (tasks/boxes/workflows/file watchers) must match 1:1 in
+    # both directions. Infrastructure (agents, calendars, variables, files) is
+    # matched by "JIL references it -> Stonebranch must provide it"; extra
+    # Stonebranch infrastructure is informational, not a migration mismatch.
+    matched_keys = (sb.job_keys & jl.job_keys) | (sb.infra_keys & jl.infra_keys)
+    missing_in_sb = sorted((jl.job_keys - sb.job_keys) | (jl.infra_keys - sb.infra_keys))
+    missing_in_jil = sorted(sb.job_keys - jl.job_keys)
+    unreferenced_infra = sorted(sb.infra_keys - jl.infra_keys)
+
     matched_edge_keys = sb.edge_keys & jl.edge_keys
     missing_edges_in_sb = sorted(jl.edge_keys - sb.edge_keys)
     missing_edges_in_jil = sorted(sb.edge_keys - jl.edge_keys)
@@ -65,7 +85,19 @@ def compare_graphs(stonebranch: Graph, jil: Graph, mapping: MappingConfig, confi
         jil,
     )
     diagnostics = build_diagnostics(sb, jl, mapping, mapping_usage)
+    diagnostics["stonebranch_unreferenced_infrastructure"] = [
+        node_payload_with_key(sb.node_index[key], key) for key in unreferenced_infra if key in sb.node_index
+    ]
+    if env_map:
+        diagnostics["env_normalization"] = [
+            {"stonebranch_env": left_env, "jil_env": right_env, "action": "stonebranch env label was normalized to the JIL env label for comparison keys"}
+            for left_env, right_env in sorted(env_map.items())
+        ]
+
     summary = build_summary(stonebranch, jil, matched_keys, missing_in_sb, missing_in_jil, matched_edge_keys, missing_edges_in_sb, missing_edges_in_jil, attributes, diagnostics)
+    summary.update(side_scope_summary("stonebranch", sb))
+    summary.update(side_scope_summary("jil", jl))
+    summary["stonebranch_unreferenced_infrastructure"] = len(unreferenced_infra)
     summary.update(metrics_to_dict(compute_comparison_metrics(summary, nodes, edges, attributes, stonebranch, jil)))
 
     comparison = Comparison(summary=summary, nodes=nodes, edges=edges, attributes=attributes, diagnostics=diagnostics)
@@ -73,33 +105,178 @@ def compare_graphs(stonebranch: Graph, jil: Graph, mapping: MappingConfig, confi
     return comparison
 
 
+def build_env_map(stonebranch: Graph, jil: Graph) -> dict[str, str]:
+    """Map the Stonebranch env label onto the JIL env label when both graphs
+    are single-env and the labels differ.
+
+    Env labels are user-provided run parameters. When each side uses exactly one
+    label and they disagree (e.g. "PROD" vs "default"), every comparison key
+    would mismatch even though the objects correspond. The label difference is
+    reported in diagnostics instead.
+    """
+    sb_envs = {node.env for node in stonebranch.nodes.values() if node.env}
+    jil_envs = {node.env for node in jil.nodes.values() if node.env}
+    if len(sb_envs) == 1 and len(jil_envs) == 1 and sb_envs != jil_envs:
+        return {next(iter(sb_envs)): next(iter(jil_envs))}
+    return {}
+
+
 @dataclass
 class SideComparisonIndex:
     node_index: dict[str, Node]
     node_collisions: list[dict[str, Any]]
-    node_keys: set[str]
+    job_keys: set[str]
+    infra_keys: set[str]
+    system_specific: list[dict[str, Any]]
+    reference_only_count: int
+    artifact_node_count: int
     edge_index: dict[str, Edge]
     edge_collisions: list[dict[str, Any]]
     edge_keys: set[str]
+    one_sided_relation_counts: dict[str, int]
+    artifact_edge_count: int
+    duplicate_edge_evidence_count: int
+
+    @property
+    def comparable_node_count(self) -> int:
+        return len(self.job_keys) + len(self.infra_keys)
 
 
-def build_side_indexes(graph: Graph, mapping: MappingConfig, left: bool, mapping_usage: set[str]) -> SideComparisonIndex:
-    node_buckets = bucket_nodes(graph, mapping, left=left, mapping_usage=mapping_usage)
-    edge_buckets = bucket_edges(graph, mapping, left=left, mapping_usage=mapping_usage)
-    node_index = single_item_index(node_buckets)
-    edge_index = single_item_index(edge_buckets)
+NODE_CATEGORY_JOB = "job"
+NODE_CATEGORY_JOB_REFERENCE = "job_reference"
+NODE_CATEGORY_INFRASTRUCTURE = "infrastructure"
+NODE_CATEGORY_SYSTEM_SPECIFIC = "system_specific"
+NODE_CATEGORY_ARTIFACT = "artifact"
+
+
+def node_comparison_category(node: Node) -> str:
+    """Classify a node by what it represents for cross-system comparison.
+
+    - job: a schedulable object definition (task/box/workflow/file watcher).
+    - job_reference: a synthetic placeholder created from a reference to a
+      job-like object. It is evidence of an edge, not an object definition,
+      so it must never match (or mask) a real definition.
+    - infrastructure: runtime environment objects (agents, calendars,
+      variables, files). JIL can only reference them, so references and
+      definitions are comparable with each other.
+    - system_specific: object kinds the other scheduler cannot express
+      (triggers, credentials, connections, scripts, email templates).
+    - artifact: internal helper nodes (command-hash nodes, deep-scan finds).
+    """
+    if node.kind in ARTIFACT_NODE_KINDS or node.metadata.get("artifact"):
+        return NODE_CATEGORY_ARTIFACT
+    synthetic = bool(node.metadata.get("synthetic"))
+    if node.kind in JOB_LIKE_KINDS:
+        return NODE_CATEGORY_JOB_REFERENCE if synthetic else NODE_CATEGORY_JOB
+    if node.kind in INFRASTRUCTURE_KINDS:
+        return NODE_CATEGORY_INFRASTRUCTURE
+    if node.kind in SYSTEM_SPECIFIC_KINDS:
+        return NODE_CATEGORY_SYSTEM_SPECIFIC
+    if node.kind == KIND_OBJECT and synthetic:
+        return NODE_CATEGORY_ARTIFACT
+    return NODE_CATEGORY_JOB_REFERENCE if synthetic else NODE_CATEGORY_JOB
+
+
+def build_side_indexes(
+    graph: Graph,
+    mapping: MappingConfig,
+    left: bool,
+    mapping_usage: set[str],
+    env_map: dict[str, str] | None = None,
+) -> SideComparisonIndex:
+    job_buckets: dict[str, list[Node]] = {}
+    infra_buckets: dict[str, list[Node]] = {}
+    system_specific: list[dict[str, Any]] = []
+    reference_only_count = 0
+    artifact_node_count = 0
+
+    for node in graph.nodes.values():
+        category = node_comparison_category(node)
+        if category == NODE_CATEGORY_ARTIFACT:
+            artifact_node_count += 1
+            continue
+        if category == NODE_CATEGORY_JOB_REFERENCE:
+            reference_only_count += 1
+            continue
+        key = comparison_node_key(node, mapping, left, mapping_usage, env_map=env_map)
+        if category == NODE_CATEGORY_SYSTEM_SPECIFIC:
+            system_specific.append(node_payload_with_key(node, key))
+            continue
+        target = job_buckets if category == NODE_CATEGORY_JOB else infra_buckets
+        target.setdefault(key, []).append(node)
+
+    # Job identity must be unambiguous: colliding keys are excluded from
+    # matching and reported. Infrastructure duplicates (definition + reference
+    # with the same name) describe the same object, so they are deduplicated
+    # preferring the real definition.
+    job_index = {key: items[0] for key, items in job_buckets.items() if len(items) == 1}
+    infra_index = {key: prefer_definition(items) for key, items in infra_buckets.items()}
+
+    edge_buckets = bucket_edges(graph, mapping, left=left, mapping_usage=mapping_usage, env_map=env_map)
+    one_sided_relation_counts: dict[str, int] = {}
+    artifact_edge_count = 0
+    comparable_edge_buckets: dict[str, list[Edge]] = {}
+    for key, items in edge_buckets.items():
+        relation = edge_bucket_relation(key, items)
+        if relation in ONE_SIDED_EDGE_RELATIONS:
+            one_sided_relation_counts[relation] = one_sided_relation_counts.get(relation, 0) + len(items)
+            continue
+        if relation in ARTIFACT_EDGE_RELATIONS or key.startswith("broken:"):
+            artifact_edge_count += len(items)
+            continue
+        comparable_edge_buckets[key] = items
+
+    # Identical comparison keys on the same side describe the same dependency
+    # coming from several evidence sources (e.g. successorTask field plus a
+    # dependency record). That is duplicate evidence, not ambiguity, so the
+    # edge stays comparable and duplicates are reported as diagnostics.
+    edge_index = {key: items[0] for key, items in comparable_edge_buckets.items()}
+    duplicate_edge_evidence = sum(len(items) - 1 for items in comparable_edge_buckets.values() if len(items) > 1)
+
     return SideComparisonIndex(
-        node_index=node_index,
-        node_collisions=collision_payload(node_buckets),
-        node_keys=set(node_index),
+        node_index={**infra_index, **job_index},
+        node_collisions=collision_payload(job_buckets),
+        job_keys=set(job_index),
+        infra_keys=set(infra_index),
+        system_specific=sorted(system_specific, key=lambda item: item.get("comparison_key", "")),
+        reference_only_count=reference_only_count,
+        artifact_node_count=artifact_node_count,
         edge_index=edge_index,
-        edge_collisions=edge_collision_payload(edge_buckets, graph),
+        edge_collisions=edge_collision_payload(comparable_edge_buckets, graph),
         edge_keys=set(edge_index),
+        one_sided_relation_counts=one_sided_relation_counts,
+        artifact_edge_count=artifact_edge_count,
+        duplicate_edge_evidence_count=duplicate_edge_evidence,
     )
 
 
-def single_item_index(buckets: dict[str, list[Any]]) -> dict[str, Any]:
-    return {key: items[0] for key, items in buckets.items() if len(items) == 1}
+def prefer_definition(nodes: list[Node]) -> Node:
+    for node in nodes:
+        if not node.metadata.get("synthetic"):
+            return node
+    return nodes[0]
+
+
+def edge_bucket_relation(key: str, items: list[Edge]) -> str:
+    parts = edge_key_parts(key)
+    if parts:
+        return parts[1]
+    return items[0].relation if items else ""
+
+
+def side_scope_summary(prefix: str, side: SideComparisonIndex) -> dict[str, Any]:
+    return {
+        f"{prefix}_comparable_nodes": side.comparable_node_count,
+        f"{prefix}_job_nodes": len(side.job_keys),
+        f"{prefix}_infrastructure_nodes": len(side.infra_keys),
+        f"{prefix}_system_specific_nodes": len(side.system_specific),
+        f"{prefix}_reference_only_nodes": side.reference_only_count,
+        f"{prefix}_artifact_nodes": side.artifact_node_count,
+        f"{prefix}_comparable_edges": len(side.edge_keys),
+        f"{prefix}_one_sided_edges": sum(side.one_sided_relation_counts.values()),
+        f"{prefix}_artifact_edges": side.artifact_edge_count,
+        f"{prefix}_duplicate_edge_evidence": side.duplicate_edge_evidence_count,
+    }
 
 
 def compare_matched_attributes(matched_keys: set[str], sb_nodes: dict[str, Node], jil_nodes: dict[str, Node]) -> dict[str, list[dict[str, Any]]]:
@@ -110,7 +287,16 @@ def compare_matched_attributes(matched_keys: set[str], sb_nodes: dict[str, Node]
     for key in sorted(matched_keys):
         sb_node = sb_nodes[key]
         jil_node = jil_nodes[key]
-        if comparable_hash(sb_node) and comparable_hash(jil_node) and sb_node.attributes_hash != jil_node.attributes_hash:
+        # Raw attribute hashes are only comparable when both sides use the same
+        # source format. Stonebranch JSON and AutoSys JIL attribute payloads
+        # always differ byte-wise, so cross-system hash differences carry no
+        # signal; commands/conditions are compared semantically below instead.
+        if (
+            sb_node.source_system == jil_node.source_system
+            and comparable_hash(sb_node)
+            and comparable_hash(jil_node)
+            and sb_node.attributes_hash != jil_node.attributes_hash
+        ):
             changed.append(node_pair_payload(sb_node, jil_node, comparison_key=key))
         command_item = command_difference_payload(key, sb_node, jil_node)
         if command_item:
@@ -129,7 +315,32 @@ def compare_matched_attributes(matched_keys: set[str], sb_nodes: dict[str, Node]
 def command_difference_payload(key: str, sb_node: Node, jil_node: Node) -> dict[str, Any] | None:
     sb_command = sb_node.metadata.get("command_hash")
     jil_command = jil_node.metadata.get("command_hash")
-    if not sb_command or not jil_command or sb_command == jil_command:
+    if not sb_command and not jil_command:
+        return None
+    if bool(sb_command) != bool(jil_command):
+        # A matched object where only one side defines a command is a real
+        # migration difference, not something to silently skip.
+        status = "command_missing_in_stonebranch" if not sb_command else "command_missing_in_jil"
+        return {
+            "key": key,
+            "status": status,
+            "strict_match": False,
+            "semantic_match": False,
+            "stonebranch": sb_node.name,
+            "jil": jil_node.name,
+            "stonebranch_command_hash": sb_command or "",
+            "jil_command_hash": jil_command or "",
+            "stonebranch_semantic_command_hash": sb_node.metadata.get("semantic_command_hash") or "",
+            "jil_semantic_command_hash": jil_node.metadata.get("semantic_command_hash") or "",
+            "normalization_reasons": [],
+            "variable_names": [],
+            "env_tokens": [],
+            "script_basenames": [],
+            "stonebranch_command_normalization": command_normalization_payload(sb_node),
+            "jil_command_normalization": command_normalization_payload(jil_node),
+            "reason": "Command is defined on only one side of the matched pair.",
+        }
+    if sb_command == jil_command:
         return None
 
     sb_semantic = sb_node.metadata.get("semantic_command_hash")
@@ -258,7 +469,19 @@ def build_diagnostics(sb: SideComparisonIndex, jl: SideComparisonIndex, mapping:
         "stonebranch_edge_collisions": sb.edge_collisions,
         "jil_edge_collisions": jl.edge_collisions,
         "unused_mappings": unused_mapping_payload(mapping, mapping_usage),
+        # Objects the other scheduler cannot express (triggers, credentials,
+        # connections, scripts, email templates). Informational by design.
+        "stonebranch_only_objects": sb.system_specific,
+        "jil_only_objects": jl.system_specific,
+        # Relations excluded from the edge diff because only one system can
+        # express them. Counts per normalized relation.
+        "stonebranch_one_sided_relations": one_sided_relation_rows(sb.one_sided_relation_counts),
+        "jil_one_sided_relations": one_sided_relation_rows(jl.one_sided_relation_counts),
     }
+
+
+def one_sided_relation_rows(counts: dict[str, int]) -> list[dict[str, Any]]:
+    return [{"relation": relation, "count": count} for relation, count in sorted(counts.items())]
 
 
 def build_summary(
@@ -288,6 +511,10 @@ def build_summary(
         "command_differences": len(attributes.get("command_differences", [])),
         "command_syntax_diff_only": count_command_differences_by_status(attributes, "command_syntax_diff_only"),
         "command_semantic_mismatches": count_command_differences_by_status(attributes, "command_semantic_mismatch"),
+        "command_presence_differences": (
+            count_command_differences_by_status(attributes, "command_missing_in_stonebranch")
+            + count_command_differences_by_status(attributes, "command_missing_in_jil")
+        ),
         "condition_differences": len(attributes.get("condition_differences", [])),
         "stonebranch_key_collision_count": len(diagnostics.get("stonebranch_key_collisions", [])),
         "jil_key_collision_count": len(diagnostics.get("jil_key_collisions", [])),
@@ -305,22 +532,34 @@ def bucket_nodes(graph: Graph, mapping: MappingConfig, left: bool, mapping_usage
     return buckets
 
 
-def bucket_edges(graph: Graph, mapping: MappingConfig, left: bool, mapping_usage: set[str]) -> dict[str, list[Edge]]:
+def bucket_edges(
+    graph: Graph,
+    mapping: MappingConfig,
+    left: bool,
+    mapping_usage: set[str],
+    env_map: dict[str, str] | None = None,
+) -> dict[str, list[Edge]]:
     buckets: dict[str, list[Edge]] = {}
     for edge in graph.edges.values():
-        key = comparison_edge_key(edge, graph, mapping, left, mapping_usage)
+        key = comparison_edge_key(edge, graph, mapping, left, mapping_usage, env_map=env_map)
         buckets.setdefault(key, []).append(edge)
     return buckets
 
 
-def comparison_node_key(node: Node, mapping: MappingConfig, left: bool, mapping_usage: set[str] | None = None) -> str:
+def comparison_node_key(
+    node: Node,
+    mapping: MappingConfig,
+    left: bool,
+    mapping_usage: set[str] | None = None,
+    env_map: dict[str, str] | None = None,
+) -> str:
     if left:
         mapped = lookup_mapping(node, mapping)
         if mapped:
             if mapping_usage is not None:
                 mapping_usage.add(mapped[0])
-            return normalize_key(mapped[1], mapping)
-    return normalize_key(node.canonical_key, mapping)
+            return normalize_key(mapped[1], mapping, env_map=env_map)
+    return normalize_key(node.canonical_key, mapping, env_map=env_map)
 
 
 def lookup_mapping(node: Node, mapping: MappingConfig) -> tuple[str, str] | None:
@@ -337,16 +576,20 @@ def lookup_mapping(node: Node, mapping: MappingConfig) -> tuple[str, str] | None
     return None
 
 
-def normalize_key(key: str, mapping: MappingConfig) -> str:
+def normalize_key(key: str, mapping: MappingConfig, env_map: dict[str, str] | None = None) -> str:
     key = str(key)
-    parts = key.split(":", 3)
+    parts = key.split(":")
     # Accept source_system:env:kind:name IDs and env:kind:name canonical keys.
-    if len(parts) == 4 and parts[0] in KNOWN_SOURCE_SYSTEMS:
-        _, env, kind, name = parts
-    elif len(parts) == 3:
-        env, kind, name = parts
+    # Names may themselves contain colons, so split from the left only for the
+    # fixed prefix parts.
+    if len(parts) >= 4 and parts[0] in KNOWN_SOURCE_SYSTEMS:
+        _, env, kind, name = key.split(":", 3)
+    elif len(parts) >= 3:
+        env, kind, name = key.split(":", 2)
     else:
         env, kind, name = "default", KIND_OBJECT, key
+    if env_map:
+        env = env_map.get(env, env)
     kind = comparison_kind(mapping.kind_aliases.get(kind, kind))
     name = normalize_name(comparison_name(name))
     for rule in mapping.name_rewrites:
@@ -357,25 +600,57 @@ def normalize_key(key: str, mapping: MappingConfig) -> str:
     return f"{env}:{kind}:{name}"
 
 
+COMPARISON_KIND_MAP = {
+    # AutoSys boxes and Stonebranch workflows are the same containment concept.
+    KIND_WORKFLOW: KIND_BOX,
+    # AutoSys file-watcher jobs migrate to Stonebranch file-monitor tasks; both
+    # are schedulable job objects with the same identity.
+    KIND_FILE_WATCHER: KIND_TASK,
+    # AutoSys "machine" may map to a Stonebranch agent or an agent cluster;
+    # both represent the runtime execution target.
+    KIND_AGENT_CLUSTER: KIND_AGENT,
+}
 
 
 def comparison_kind(kind: str) -> str:
     """Return kind used for cross-system comparison keys.
 
-    AutoSys boxes and Stonebranch workflows represent the same containment
-    concept in migration analysis, so compare them as box-like containers while
-    preserving the original node kind in graph.json and reports.
+    Kinds that represent the same migration concept in both schedulers are
+    collapsed for matching, while the original node kind stays untouched in
+    graph.json and reports.
     """
-    if kind == KIND_WORKFLOW:
-        return KIND_BOX
-    return kind
+    return COMPARISON_KIND_MAP.get(kind, kind)
 
-def comparison_edge_key(edge: Edge, graph: Graph, mapping: MappingConfig, left: bool, mapping_usage: set[str] | None = None) -> str:
+
+COMPARISON_RELATION_MAP = {
+    # Running on an agent cluster is the same runtime-target concept as
+    # running on an agent (AutoSys "machine").
+    REL_RUNS_ON_CLUSTER: REL_RUNS_ON,
+}
+
+
+def comparison_relation(relation: str) -> str:
+    return COMPARISON_RELATION_MAP.get(relation, relation)
+
+
+def comparison_edge_key(
+    edge: Edge,
+    graph: Graph,
+    mapping: MappingConfig,
+    left: bool,
+    mapping_usage: set[str] | None = None,
+    env_map: dict[str, str] | None = None,
+) -> str:
     components = comparison_edge_components(edge, graph)
     if components is None:
         return f"broken:{edge.id}"
     source, relation, target = components
-    return f"{comparison_node_key(source, mapping, left, mapping_usage)}->{relation}->{comparison_node_key(target, mapping, left, mapping_usage)}"
+    relation = comparison_relation(relation)
+    return (
+        f"{comparison_node_key(source, mapping, left, mapping_usage, env_map=env_map)}"
+        f"->{relation}->"
+        f"{comparison_node_key(target, mapping, left, mapping_usage, env_map=env_map)}"
+    )
 
 
 def comparison_edge_components(edge: Edge, graph: Graph) -> tuple[Node, str, Node] | None:
@@ -537,6 +812,8 @@ def build_risks(comparison: Comparison) -> list[str]:
         risks.append("Matched objects have semantically different command hashes.")
     if s.get("command_syntax_diff_only", 0):
         risks.append("Matched objects have command syntax differences only after variable/environment/script-path normalization.")
+    if s.get("command_presence_differences", 0):
+        risks.append("Matched objects where a command is defined on only one side.")
     if s.get("condition_differences", 0):
         risks.append("Matched objects have different condition hashes.")
     if s.get("critical_dependency_loss_count", 0):
@@ -583,16 +860,24 @@ def write_report(path: Path, comparison: Comparison) -> None:
     s = comparison.summary
     lines = [
         "# Stonebranch vs JIL comparison report", "", "## Summary", "",
-        f"- Stonebranch nodes: **{s.get('stonebranch_nodes', 0)}**",
-        f"- JIL nodes: **{s.get('jil_nodes', 0)}**",
-        f"- Matched nodes: **{s.get('matched_nodes', 0)}**",
+        "Object and dependency matching is scoped to comparable essence:",
+        "jobs/boxes/workflows/file watchers are matched 1:1, infrastructure",
+        "(agents, calendars, variables, files) is matched by JIL usage, and",
+        "Stonebranch-only object kinds are reported separately.", "",
+        f"- Stonebranch comparable objects: **{s.get('stonebranch_comparable_nodes', s.get('stonebranch_nodes', 0))}** (graph nodes total: {s.get('stonebranch_nodes', 0)})",
+        f"- JIL comparable objects: **{s.get('jil_comparable_nodes', s.get('jil_nodes', 0))}** (graph nodes total: {s.get('jil_nodes', 0)})",
+        f"- Matched objects: **{s.get('matched_nodes', 0)}**",
         f"- Missing in Stonebranch: **{s.get('missing_in_stonebranch', 0)}**",
         f"- Missing in JIL: **{s.get('missing_in_jil', 0)}**",
-        f"- Stonebranch edges: **{s.get('stonebranch_edges', 0)}**",
-        f"- JIL edges: **{s.get('jil_edges', 0)}**",
-        f"- Matched edges: **{s.get('matched_edges', 0)}**",
+        f"- Stonebranch-only object kinds (informational): **{s.get('stonebranch_system_specific_nodes', 0)}**",
+        f"- Stonebranch infrastructure not referenced by JIL (informational): **{s.get('stonebranch_unreferenced_infrastructure', 0)}**",
+        f"- Stonebranch comparable dependencies: **{s.get('stonebranch_comparable_edges', s.get('stonebranch_edges', 0))}** (graph edges total: {s.get('stonebranch_edges', 0)})",
+        f"- JIL comparable dependencies: **{s.get('jil_comparable_edges', s.get('jil_edges', 0))}** (graph edges total: {s.get('jil_edges', 0)})",
+        f"- Matched dependencies: **{s.get('matched_edges', 0)}**",
         f"- Missing edges in Stonebranch: **{s.get('missing_edges_in_stonebranch', 0)}**",
-        f"- Missing edges in JIL: **{s.get('missing_edges_in_jil', 0)}**", "", "## Migration metrics", "",
+        f"- Missing edges in JIL: **{s.get('missing_edges_in_jil', 0)}**",
+        f"- One-sided relations excluded from matching (Stonebranch/JIL): **{s.get('stonebranch_one_sided_edges', 0)} / {s.get('jil_one_sided_edges', 0)}**",
+        "", "## Migration metrics", "",
         f"- Migration readiness score: **{s.get('migration_readiness_score', 0)}/100** (`{s.get('readiness_grade', 'unknown')}`)",
         f"- Node match rate: **{s.get('node_match_rate_percent', 0)}%**",
         f"- Edge match rate: **{s.get('edge_match_rate_percent', 0)}%**",
@@ -610,6 +895,7 @@ def write_report(path: Path, comparison: Comparison) -> None:
         lines.append("- No critical graph risks detected by the current rules.")
     append_collision_section(lines, comparison)
     append_command_normalization_section(lines, comparison)
+    append_scope_sections(lines, comparison)
     lines += ["", "## Missing objects in Stonebranch", "", "| Kind | Object | JIL source |", "|---|---|---|"]
     for item in comparison.nodes.get("missing_in_stonebranch", [])[:200]:
         lines.append(f"| {item['kind']} | `{item['name']}` | `{item['source_file']}` |")
@@ -645,6 +931,49 @@ def append_command_normalization_section(lines: list[str], comparison: Compariso
             f"| `{item.get('status', '')}` | `{item.get('stonebranch', '')}` / `{item.get('jil', '')}` "
             f"| {reasons} | {variables} | {env_tokens} | {scripts} |"
         )
+
+
+def append_scope_sections(lines: list[str], comparison: Comparison) -> None:
+    one_sided = [
+        ("Stonebranch", comparison.diagnostics.get("stonebranch_one_sided_relations", [])),
+        ("JIL", comparison.diagnostics.get("jil_one_sided_relations", [])),
+    ]
+    if any(rows for _, rows in one_sided):
+        lines += [
+            "",
+            "## One-sided relations excluded from matching",
+            "",
+            "These relations exist in only one scheduler by design (triggers, credentials, scripts, connections, email templates) and are not migration gaps.",
+            "",
+            "| Side | Relation | Count |", "|---|---|---|",
+        ]
+        for side, rows in one_sided:
+            for row in rows:
+                lines.append(f"| {side} | `{row.get('relation', '')}` | {row.get('count', 0)} |")
+
+    sb_only = comparison.diagnostics.get("stonebranch_only_objects", [])
+    if sb_only:
+        lines += [
+            "",
+            "## Stonebranch-only objects (not expressible in JIL)",
+            "",
+            "| Kind | Object | Source |", "|---|---|---|",
+        ]
+        for item in sb_only[:200]:
+            lines.append(f"| {item.get('kind', '')} | `{item.get('name', '')}` | `{item.get('source_file', '')}` |")
+
+    unreferenced = comparison.diagnostics.get("stonebranch_unreferenced_infrastructure", [])
+    if unreferenced:
+        lines += [
+            "",
+            "## Stonebranch infrastructure not referenced by JIL",
+            "",
+            "Agents, calendars, variables, and files defined or referenced in Stonebranch that no JIL object uses. Informational.",
+            "",
+            "| Kind | Object | Source |", "|---|---|---|",
+        ]
+        for item in unreferenced[:200]:
+            lines.append(f"| {item.get('kind', '')} | `{item.get('name', '')}` | `{item.get('source_file', '')}` |")
 
 
 def append_collision_section(lines: list[str], comparison: Comparison) -> None:

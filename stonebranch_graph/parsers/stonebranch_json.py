@@ -54,7 +54,15 @@ from stonebranch_graph.domain import (
     REL_WATCHES_FILE,
     SOURCE_STONEBRANCH,
 )
-from stonebranch_graph.normalizers import command_evidence, command_hash, command_normalization_diagnostics, semantic_command_hash
+from stonebranch_graph.domain import KIND_FILE_WATCHER
+from stonebranch_graph.normalizers import (
+    command_evidence,
+    command_hash,
+    command_normalization_diagnostics,
+    command_variable_names,
+    normalize_command_variable_name,
+    semantic_command_hash,
+)
 from stonebranch_graph.utils import discover_source_files, first_string, is_secret_key, normalized_kind, read_json_text, safe_metadata
 
 
@@ -69,6 +77,24 @@ VAR_TOKEN_RE = re.compile(
     """,
     re.VERBOSE,
 )
+
+# Variable usage is compared against AutoSys, where variables can only appear
+# inside command text. Extracting tokens from every JSON string creates
+# variable objects and uses_variable edges that AutoSys can never express, so
+# extraction is limited to command-like fields.
+COMMAND_LIKE_KEYS = {"command", "script"}
+
+# Stonebranch stores intra-workflow dependencies as a vertex/edge graph inside
+# the workflow definition. These subtrees are parsed structurally and must be
+# skipped by the generic key-based reference walker.
+WORKFLOW_VERTEX_KEYS = ("workflowVertices", "workflow_vertices", "vertices")
+WORKFLOW_EDGE_KEYS = ("workflowEdges", "workflow_edges", "edges")
+WORKFLOW_STRUCTURE_KEY_NAMES = {key.lower() for key in (*WORKFLOW_VERTEX_KEYS, *WORKFLOW_EDGE_KEYS)}
+
+# Native Stonebranch type values that mean "this object is a workflow" even
+# when the export stores it in the tasks folder.
+WORKFLOW_NATIVE_TYPES = {"taskworkflow", "workflow"}
+JOB_LIKE_TARGET_KINDS = {KIND_TASK, KIND_WORKFLOW, KIND_FILE_WATCHER}
 
 
 TARGET_KIND_BY_NATIVE_RELATION = {
@@ -154,11 +180,12 @@ class StonebranchJsonParser:
                 continue
             for item_relative_path, item in self._iter_object_dicts(data, relative_path, graph):
                 env = self._env_from_path(path) if self.env_aware else self.env
-                name = self._detect_object_name(item, kind, path)
                 native_kind = self._native_kind(item) or kind
+                item_kind = self._effective_kind(kind, native_kind)
+                name = self._detect_object_name(item, item_kind, path)
                 node = self._make_node(
                     env=env,
-                    kind=kind,
+                    kind=item_kind,
                     name=name,
                     native_kind=native_kind,
                     source_file=item_relative_path,
@@ -173,7 +200,7 @@ class StonebranchJsonParser:
                         f"{existing.source_file!r}, merging duplicate from {item_relative_path!r}.",
                     )
                 graph.add_node(node)
-                records.append((path, item_relative_path, env, kind, name, item))
+                records.append((path, item_relative_path, env, item_kind, name, item))
 
         if not records and not dependency_records:
             self._append_warning_once(graph, f"No Stonebranch objects were parsed from {input_path}.")
@@ -192,6 +219,8 @@ class StonebranchJsonParser:
 
         for path, relative_path, env, source_kind, source_name, data in records:
             source_id = make_node_id(SOURCE_STONEBRANCH, env, source_kind, source_name)
+            if source_kind == KIND_WORKFLOW:
+                self._add_workflow_structure_edges(graph, registry, env, relative_path, source_id, data)
             for ref_value, native_relation, relation, evidence_path, evidence_key, evidence_value in self._find_references(data, source_kind):
                 target_kind = self._kind_from_relation(native_relation, relation)
                 target_id = self._resolve_or_create_ref_node(
@@ -427,6 +456,214 @@ class StonebranchJsonParser:
                 return value.strip()
         return None
 
+    def _effective_kind(self, kind: str, native_kind: str) -> str:
+        """Promote objects whose native Stonebranch type marks them as
+        workflows even when the export stores them in a generic tasks folder.
+
+        Universal Controller exports frequently place every task type,
+        including type=taskWorkflow, under one tasks directory. Treating those
+        records as plain tasks breaks matching against AutoSys boxes and drops
+        their vertex/edge dependency structure.
+        """
+        if kind == KIND_TASK and self._normalized_type_token(native_kind) in WORKFLOW_NATIVE_TYPES:
+            return KIND_WORKFLOW
+        return kind
+
+    @staticmethod
+    def _normalized_type_token(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value).lower())
+
+    # --- Workflow vertex/edge structure --------------------------------------
+
+    def _add_workflow_structure_edges(
+        self,
+        graph: Graph,
+        registry: dict[str, dict],
+        env: str,
+        relative_path: str,
+        workflow_id: str,
+        data: dict[str, Any],
+    ) -> None:
+        """Parse Stonebranch workflow vertices/edges into containment and
+        dependency edges.
+
+        In Stonebranch, dependencies between tasks inside a workflow are stored
+        as a graph: workflowVertices map vertex ids to task names and
+        workflowEdges connect vertices with a condition (Success/Failure/...).
+        These are the AutoSys condition dependencies' counterpart and must be
+        compared as depends_on_* edges, not counted as opaque extra edges.
+        """
+        vertices = self._first_list(data, WORKFLOW_VERTEX_KEYS)
+        edges = self._first_list(data, WORKFLOW_EDGE_KEYS)
+
+        vertex_tasks: dict[str, str] = {}
+        for index, item in enumerate(vertices):
+            if not isinstance(item, dict):
+                continue
+            task_name = self._workflow_task_name(item)
+            if not task_name:
+                continue
+            node_id = self._resolve_or_create_ref_node(
+                graph=graph,
+                registry=registry,
+                env=env,
+                target_kind=KIND_TASK,
+                target_name=task_name,
+                native_relation="workflow_vertex",
+                source_file=relative_path,
+            )
+            vertex_id = self._structure_value(
+                item.get("vertexId") if "vertexId" in item else item.get("vertex_id", item.get("id"))
+            )
+            if vertex_id:
+                vertex_tasks[vertex_id] = node_id
+            graph.add_edge(
+                Edge(
+                    id=make_edge_id(workflow_id, node_id, REL_CONTAINS, "workflow_vertex"),
+                    source=workflow_id,
+                    target=node_id,
+                    relation=REL_CONTAINS,
+                    source_system=SOURCE_STONEBRANCH,
+                    native_relation="workflow_vertex",
+                    evidence_file=relative_path,
+                    evidence_path=f"$.workflowVertices[{index}]",
+                    evidence_key="task",
+                    evidence_value=redacted_preview(task_name, self.config.max_evidence_value_len),
+                    confidence=0.97,
+                )
+            )
+
+        for index, item in enumerate(edges):
+            if not isinstance(item, dict):
+                continue
+            source_task = self._workflow_edge_endpoint(
+                graph, registry, env, relative_path, item, vertex_tasks,
+                ("sourceId", "source_id", "sourceVertex", "source_vertex", "source", "from", "fromVertex"),
+            )
+            target_task = self._workflow_edge_endpoint(
+                graph, registry, env, relative_path, item, vertex_tasks,
+                ("targetId", "target_id", "targetVertex", "target_vertex", "target", "to", "toVertex"),
+            )
+            if not source_task or not target_task or source_task == target_task:
+                if item:
+                    self._append_warning_once(
+                        graph,
+                        f"Skipped Stonebranch workflow edge without resolvable endpoints in {relative_path}.",
+                    )
+                continue
+            relation = self._workflow_edge_relation(item)
+            source_name = graph.nodes[source_task].name if source_task in graph.nodes else source_task
+            target_name = graph.nodes[target_task].name if target_task in graph.nodes else target_task
+            # Stonebranch edge direction source -> target means the target runs
+            # after the source. Normalize to dependent -> prerequisite like
+            # AutoSys condition edges.
+            graph.add_edge(
+                Edge(
+                    id=make_edge_id(target_task, source_task, relation, "workflow_edge"),
+                    source=target_task,
+                    target=source_task,
+                    relation=relation,
+                    source_system=SOURCE_STONEBRANCH,
+                    native_relation="workflow_edge",
+                    evidence_file=relative_path,
+                    evidence_path=f"$.workflowEdges[{index}]",
+                    evidence_key="workflow_edge",
+                    evidence_value=redacted_preview(
+                        f"{target_name} -> {relation} -> {source_name}",
+                        self.config.max_evidence_value_len,
+                    ),
+                    confidence=0.97,
+                )
+            )
+
+    def _first_list(self, data: dict[str, Any], keys: tuple[str, ...]) -> list[Any]:
+        for key in keys:
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+        return []
+
+    def _workflow_task_name(self, item: dict[str, Any]) -> str:
+        for key in ("task", "taskName", "task_name", "name"):
+            if key not in item:
+                continue
+            value = self._structure_value(item[key])
+            if value:
+                return value
+        return ""
+
+    def _structure_value(self, value: Any) -> str:
+        if isinstance(value, dict):
+            for key in ("value", "name", "taskName", "task_name", "id", "sysId", "sys_id"):
+                nested = value.get(key)
+                if isinstance(nested, (str, int)) and str(nested).strip():
+                    return str(nested).strip()
+            return ""
+        if isinstance(value, (str, int)):
+            return str(value).strip()
+        return ""
+
+    def _workflow_edge_endpoint(
+        self,
+        graph: Graph,
+        registry: dict[str, dict],
+        env: str,
+        relative_path: str,
+        item: dict[str, Any],
+        vertex_tasks: dict[str, str],
+        keys: tuple[str, ...],
+    ) -> str | None:
+        ref: Any = None
+        for key in keys:
+            if key in item and item[key] is not None:
+                ref = item[key]
+                break
+        if ref is None:
+            return None
+
+        task_name = ""
+        vertex_id = ""
+        if isinstance(ref, dict):
+            for key in ("taskName", "task_name", "task", "name"):
+                candidate = self._structure_value(ref.get(key))
+                if candidate:
+                    task_name = candidate
+                    break
+            vertex_id = self._structure_value({"value": ref.get("value", ref.get("id"))})
+        else:
+            token = self._structure_value(ref)
+            if token in vertex_tasks or token.isdigit():
+                vertex_id = token
+            else:
+                task_name = token
+
+        if vertex_id and vertex_id in vertex_tasks:
+            return vertex_tasks[vertex_id]
+        if task_name:
+            return self._resolve_or_create_ref_node(
+                graph=graph,
+                registry=registry,
+                env=env,
+                target_kind=KIND_TASK,
+                target_name=task_name,
+                native_relation="workflow_edge_task",
+                source_file=relative_path,
+            )
+        return None
+
+    def _workflow_edge_relation(self, item: dict[str, Any]) -> str:
+        raw = " ".join(
+            self._structure_value(item.get(key))
+            for key in ("condition", "Condition", "conditionType", "condition_type", "status")
+        ).lower()
+        has_success = "success" in raw
+        has_failure = "failure" in raw or "fail" in raw
+        if has_success and has_failure:
+            return REL_DEPENDS_ON_DONE
+        if has_failure:
+            return REL_DEPENDS_ON_FAILURE
+        return REL_DEPENDS_ON_SUCCESS
+
     def _detect_object_name(self, data: dict[str, Any], kind: str, path: Path) -> str:
         kind_specific_keys = {
             KIND_TASK: ("name", "Name", "title", "Title", "taskName", "TaskName"),
@@ -495,6 +732,11 @@ class StonebranchJsonParser:
             if isinstance(value, dict):
                 for child_key, child in value.items():
                     child_key_str = str(child_key)
+                    if source_kind == KIND_WORKFLOW and child_key_str.lower() in WORKFLOW_STRUCTURE_KEY_NAMES:
+                        # Workflow vertices/edges are parsed structurally into
+                        # containment and dependency edges; walking them here
+                        # would create duplicate or mis-typed references.
+                        continue
                     walk(child, f"{path}.{child_key_str}", child_key_str)
                 return
             if isinstance(value, list):
@@ -513,8 +755,12 @@ class StonebranchJsonParser:
                     refs.append((command_id, native, relation, path, key, evidence))
                 else:
                     refs.append((cleaned, native, relation, path, key, cleaned))
-            for token in self._extract_variable_tokens(cleaned):
-                refs.append((token, "variable_token", REL_USES_VARIABLE, path, key, token))
+            if key.lower() in COMMAND_LIKE_KEYS:
+                # Variable usage is only comparable with AutoSys inside command
+                # text, and the token names are normalized identically on both
+                # sides so the same variable produces the same comparison key.
+                for token in self._extract_variable_tokens(cleaned):
+                    refs.append((token, "variable_token", REL_USES_VARIABLE, path, key, token))
             if self.deep_scan and not native and self._likely_reference(cleaned):
                 refs.append((cleaned, "deep_scan_reference", REL_REFERENCES, path, key, cleaned))
 
@@ -607,11 +853,21 @@ class StonebranchJsonParser:
         return source_id, target_id, relation, native_relation
 
     def _extract_variable_tokens(self, value: str) -> list[str]:
+        """Extract variable names from command-like text.
+
+        Uses the shared cross-scheduler normalizer (same as the JIL parser) so
+        ${VAR}, $VAR, %%VAR, %VAR%, and #VAR# produce identical names on both
+        sides, plus Stonebranch-specific {{var}} and @(var) wrappers.
+        """
         found: list[str] = []
+        for name in command_variable_names(value):
+            if name not in found:
+                found.append(name)
         for match in VAR_TOKEN_RE.finditer(value):
             token = next((group for group in match.groups() if group), None)
-            if token:
-                found.append(token.strip())
+            normalized = normalize_command_variable_name(token or "")
+            if normalized and normalized not in found:
+                found.append(normalized)
         return found
 
     def _likely_reference(self, value: str) -> bool:
@@ -677,6 +933,21 @@ class StonebranchJsonParser:
             return existing
 
         same_name_matches = self._same_name_matches(registry, env, target_name)
+
+        if target_kind in JOB_LIKE_TARGET_KINDS:
+            # A dependency/containment/trigger reference to a job-like object
+            # may point at a task, a workflow, or a file monitor: AutoSys jobs,
+            # boxes, and file watchers all migrate into these. Link to the one
+            # defined object with that name instead of fabricating a synthetic
+            # node of the wrong kind.
+            job_like_matches = [
+                node_id
+                for node_id in sorted(same_name_matches)
+                if graph.nodes[node_id].kind in JOB_LIKE_TARGET_KINDS
+            ]
+            if len(job_like_matches) == 1:
+                return job_like_matches[0]
+
         if len(same_name_matches) == 1:
             matched_node = graph.nodes[next(iter(same_name_matches))]
             self._append_warning_once(
@@ -694,6 +965,9 @@ class StonebranchJsonParser:
 
         metadata = {"synthetic": True, "reason": "referenced_without_object_file"}
         if target_kind == KIND_COMMAND:
+            # Command nodes are hash-named helper artifacts; commands are
+            # compared at attribute level, never as objects.
+            metadata["artifact"] = True
             metadata["semantic_command_hash"] = target_name
         node = self._make_node(
             env=env,

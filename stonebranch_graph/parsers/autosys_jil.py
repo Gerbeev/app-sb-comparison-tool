@@ -516,6 +516,9 @@ class AutosysJilParser:
             "semantic_command_hash",
             job.source_file,
             metadata={
+                # Hash-named helper node: commands are compared at attribute
+                # level (strict + semantic hash), never as graph objects.
+                "artifact": True,
                 "command_hash": command_hash_value,
                 "semantic_command_hash": semantic_hash_value,
                 "command_normalization": command_normalization_diagnostics(command),

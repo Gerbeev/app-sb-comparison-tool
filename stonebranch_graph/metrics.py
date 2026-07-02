@@ -7,6 +7,7 @@ from .core import Graph
 from .domain import (
     CALENDAR_RELATIONS,
     CRITICAL_DEPENDENCY_RELATIONS,
+    JOB_LIKE_KINDS,
     KIND_TASK,
     REL_DEPENDS_ON,
     REL_STARTS,
@@ -138,7 +139,17 @@ def compute_graph_metrics(graph: Graph, *, traversal: GraphTraversalCache | None
     relation_types = traversal.relation_counts
 
     task_ids = {node.id for node in traversal.sorted_nodes if node.kind == KIND_TASK}
-    synthetic_nodes = sum(1 for node in traversal.sorted_nodes if bool(node.metadata.get("synthetic")))
+    # Only unresolved references to schedulable objects indicate a repository
+    # gap. Reference nodes for infrastructure (agents, calendars, variables,
+    # files) and content-hash artifacts (commands) are created by design and
+    # must not be counted as graph-quality problems.
+    synthetic_nodes = sum(
+        1
+        for node in traversal.sorted_nodes
+        if bool(node.metadata.get("synthetic"))
+        and node.kind in JOB_LIKE_KINDS
+        and not node.metadata.get("artifact")
+    )
     low_confidence_edges = sum(1 for edge in traversal.sorted_edges if edge.confidence < 0.8)
 
     orphan_nodes = sum(1 for node_id in graph.nodes if inbound[node_id] == 0 and outbound[node_id] == 0)
@@ -223,14 +234,22 @@ def compute_comparison_metrics(
 def compute_comparison_rate_metrics(summary: dict[str, int]) -> ComparisonRateMetrics:
     matched_nodes = summary.get("matched_nodes", 0)
     matched_edges = summary.get("matched_edges", 0)
-    stonebranch_nodes = summary.get("stonebranch_nodes", 0)
-    jil_nodes = summary.get("jil_nodes", 0)
-    stonebranch_edges = summary.get("stonebranch_edges", 0)
-    jil_edges = summary.get("jil_edges", 0)
+    # Rates are computed over comparable objects/dependencies only (job-like
+    # objects, JIL-referenced infrastructure, relations expressible in both
+    # systems). Raw graph totals include artifact and one-sided items that
+    # cannot match by design and would distort the rates. The match rate is the
+    # share of comparable items that matched among all items that were expected
+    # to match (matched + real mismatches in either direction).
+    node_mismatches = summary.get("missing_in_stonebranch", 0) + summary.get("missing_in_jil", 0)
+    edge_mismatches = summary.get("missing_edges_in_stonebranch", 0) + summary.get("missing_edges_in_jil", 0)
+    stonebranch_nodes = summary.get("stonebranch_comparable_nodes", summary.get("stonebranch_nodes", 0))
+    jil_nodes = summary.get("jil_comparable_nodes", summary.get("jil_nodes", 0))
+    stonebranch_edges = summary.get("stonebranch_comparable_edges", summary.get("stonebranch_edges", 0))
+    jil_edges = summary.get("jil_comparable_edges", summary.get("jil_edges", 0))
 
     return ComparisonRateMetrics(
-        node_match_rate_percent=percent(matched_nodes * 2, stonebranch_nodes + jil_nodes),
-        edge_match_rate_percent=percent(matched_edges * 2, stonebranch_edges + jil_edges),
+        node_match_rate_percent=percent(matched_nodes, matched_nodes + node_mismatches),
+        edge_match_rate_percent=percent(matched_edges, matched_edges + edge_mismatches),
         jil_to_stonebranch_node_coverage_percent=percent(matched_nodes, jil_nodes),
         stonebranch_to_jil_node_coverage_percent=percent(matched_nodes, stonebranch_nodes),
         jil_to_stonebranch_edge_coverage_percent=percent(matched_edges, jil_edges),
@@ -428,3 +447,4 @@ def metric_rows(metrics: dict[str, Any], prefix: str = "") -> list[dict[str, str
         else:
             rows.append({"metric": full_key, "value": str(value)})
     return rows
+
