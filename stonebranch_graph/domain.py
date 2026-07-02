@@ -123,4 +123,3 @@ ONE_SIDED_EDGE_RELATIONS = {
 # Relations excluded from edge comparison entirely: commands are compared at
 # attribute level and deep-scan references are speculative.
 ARTIFACT_EDGE_RELATIONS = {REL_RUNS_COMMAND, REL_REFERENCES}
-

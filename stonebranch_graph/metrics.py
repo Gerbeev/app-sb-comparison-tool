@@ -447,4 +447,3 @@ def metric_rows(metrics: dict[str, Any], prefix: str = "") -> list[dict[str, str
         else:
             rows.append({"metric": full_key, "value": str(value)})
     return rows
-
