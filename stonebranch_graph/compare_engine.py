@@ -4,10 +4,16 @@ from typing import Any
 
 from .config import AnalyzerConfig, MappingConfig
 from .core import Edge, Graph, Node
-from .domain import REL_CONTAINS
+from .domain import (
+    DEPENDENCY_RELATIONS,
+    REL_CONTAINS,
+    REL_DEPENDS_ON,
+    STONEBRANCH_ONLY_KINDS,
+    STONEBRANCH_ONLY_RELATIONS,
+)
 from .metrics import compute_comparison_metrics, metrics_to_dict
 from .comparison_model import Comparison, SideComparisonIndex
-from .compare_keys import comparison_edge_key, comparison_node_key
+from .compare_keys import comparison_edge_key, comparison_node_key, edge_key_parts
 from .compare_diagnostics import collision_payload, edge_collision_payload, unused_mapping_payload
 from .compare_payloads import (
     command_difference_payload,
@@ -28,13 +34,26 @@ def compare_graphs(stonebranch: Graph, jil: Graph, mapping: MappingConfig, confi
 
     matched_keys = sb.node_keys & jl.node_keys
     missing_in_sb = sorted(jl.node_keys - sb.node_keys)
-    missing_in_jil = sorted(sb.node_keys - jl.node_keys)
+    # Stonebranch-only object kinds (triggers, credentials, ...) cannot exist in
+    # JIL, so they are informational rather than migration mismatches.
+    missing_in_jil, sb_only_node_keys = partition_stonebranch_only_nodes(
+        sorted(sb.node_keys - jl.node_keys), sb.node_index
+    )
+
     matched_edge_keys = sb.edge_keys & jl.edge_keys
     missing_edges_in_sb = sorted(jl.edge_keys - sb.edge_keys)
     missing_edges_in_jil = sorted(sb.edge_keys - jl.edge_keys)
+    # A generic depends_on on one side matches a specific depends_on_* between
+    # the same objects on the other side: it is the same dependency with an
+    # unspecified condition, not a lost edge.
+    relaxed_pairs, missing_edges_in_jil, missing_edges_in_sb = match_relaxed_dependency_edges(
+        missing_edges_in_jil, missing_edges_in_sb
+    )
+    missing_edges_in_jil, sb_only_edge_keys = partition_stonebranch_only_edges(missing_edges_in_jil)
 
     attributes = compare_matched_attributes(matched_keys, sb.node_index, jl.node_index)
     nodes = build_node_diff_payloads(matched_keys, missing_in_sb, missing_in_jil, sb.node_index, jl.node_index)
+    nodes["stonebranch_only"] = [node_payload_with_key(sb.node_index[key], key) for key in sb_only_node_keys]
     edges = build_edge_diff_payloads(
         matched_edge_keys,
         missing_edges_in_sb,
@@ -44,8 +63,18 @@ def compare_graphs(stonebranch: Graph, jil: Graph, mapping: MappingConfig, confi
         stonebranch,
         jil,
     )
+    edges["matched_relaxed"] = [
+        relaxed_edge_pair_payload(sb.edge_index[sb_key], jl.edge_index[jil_key], stonebranch, jil, sb_key, jil_key)
+        for sb_key, jil_key in relaxed_pairs
+    ]
+    edges["stonebranch_only"] = [edge_payload(sb.edge_index[key], stonebranch, comparison_key=key) for key in sb_only_edge_keys]
     diagnostics = build_diagnostics(sb, jl, mapping, mapping_usage)
     summary = build_summary(stonebranch, jil, matched_keys, missing_in_sb, missing_in_jil, matched_edge_keys, missing_edges_in_sb, missing_edges_in_jil, attributes, diagnostics)
+    summary["relaxed_dependency_matches"] = len(relaxed_pairs)
+    summary["stonebranch_only_nodes"] = len(sb_only_node_keys)
+    summary["stonebranch_only_edges"] = len(sb_only_edge_keys)
+    summary["stonebranch_comparable_nodes"] = summary["stonebranch_nodes"] - len(sb_only_node_keys)
+    summary["stonebranch_comparable_edges"] = summary["stonebranch_edges"] - len(sb_only_edge_keys)
     summary.update(metrics_to_dict(compute_comparison_metrics(summary, nodes, edges, attributes, stonebranch, jil)))
 
     comparison = Comparison(summary=summary, nodes=nodes, edges=edges, attributes=attributes, diagnostics=diagnostics)
@@ -53,11 +82,102 @@ def compare_graphs(stonebranch: Graph, jil: Graph, mapping: MappingConfig, confi
     return comparison
 
 
+def partition_stonebranch_only_nodes(
+    missing_in_jil: list[str],
+    sb_node_index: dict[str, Node],
+) -> tuple[list[str], list[str]]:
+    comparable: list[str] = []
+    stonebranch_only: list[str] = []
+    for key in missing_in_jil:
+        node = sb_node_index.get(key)
+        if node is not None and node.kind in STONEBRANCH_ONLY_KINDS:
+            stonebranch_only.append(key)
+        else:
+            comparable.append(key)
+    return comparable, stonebranch_only
+
+
+def partition_stonebranch_only_edges(missing_in_jil: list[str]) -> tuple[list[str], list[str]]:
+    comparable: list[str] = []
+    stonebranch_only: list[str] = []
+    for key in missing_in_jil:
+        parts = edge_key_parts(key)
+        if parts is not None and parts[1] in STONEBRANCH_ONLY_RELATIONS:
+            stonebranch_only.append(key)
+        else:
+            comparable.append(key)
+    return comparable, stonebranch_only
+
+
+def match_relaxed_dependency_edges(
+    missing_edges_in_jil: list[str],
+    missing_edges_in_sb: list[str],
+) -> tuple[list[tuple[str, str]], list[str], list[str]]:
+    """Pair generic depends_on edges with specific depends_on_* counterparts.
+
+    Returns (matched (sb_key, jil_key) pairs, remaining sb-extra keys,
+    remaining jil-extra keys). Only pairs where one side is the generic
+    depends_on are matched; success-vs-failure style conflicts remain
+    mismatches.
+    """
+    jil_by_endpoints: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for key in missing_edges_in_sb:
+        parts = edge_key_parts(key)
+        if parts is None or parts[1] not in DEPENDENCY_RELATIONS:
+            continue
+        jil_by_endpoints.setdefault((parts[0], parts[2]), []).append((parts[1], key))
+
+    pairs: list[tuple[str, str]] = []
+    matched_sb: set[str] = set()
+    matched_jil: set[str] = set()
+    for sb_key in missing_edges_in_jil:
+        parts = edge_key_parts(sb_key)
+        if parts is None or parts[1] not in DEPENDENCY_RELATIONS:
+            continue
+        sb_relation = parts[1]
+        candidates = jil_by_endpoints.get((parts[0], parts[2]), [])
+        for jil_relation, jil_key in sorted(candidates, key=lambda item: item[1]):
+            if jil_key in matched_jil:
+                continue
+            if REL_DEPENDS_ON not in (sb_relation, jil_relation):
+                continue
+            pairs.append((sb_key, jil_key))
+            matched_sb.add(sb_key)
+            matched_jil.add(jil_key)
+            break
+
+    remaining_sb_extra = [key for key in missing_edges_in_jil if key not in matched_sb]
+    remaining_jil_extra = [key for key in missing_edges_in_sb if key not in matched_jil]
+    return pairs, remaining_sb_extra, remaining_jil_extra
+
+
+def relaxed_edge_pair_payload(
+    sb_edge: Edge,
+    jil_edge: Edge,
+    stonebranch: Graph,
+    jil: Graph,
+    sb_key: str,
+    jil_key: str,
+) -> dict[str, Any]:
+    return {
+        "key": jil_key,
+        "match_type": "dependency_family_relaxed",
+        "stonebranch_key": sb_key,
+        "jil_key": jil_key,
+        "stonebranch": edge_payload(sb_edge, stonebranch, comparison_key=sb_key),
+        "jil": edge_payload(jil_edge, jil, comparison_key=jil_key),
+    }
+
+
 def build_side_indexes(graph: Graph, mapping: MappingConfig, left: bool, mapping_usage: set[str]) -> SideComparisonIndex:
     node_buckets = bucket_nodes(graph, mapping, left=left, mapping_usage=mapping_usage)
     edge_buckets = bucket_edges(graph, mapping, left=left, mapping_usage=mapping_usage)
     node_index = single_item_index(node_buckets)
-    edge_index = single_item_index(edge_buckets)
+    # Unlike node collisions (two different objects claiming one identity),
+    # multiple edges with the same comparison key are the same semantic edge
+    # discovered through different evidence. Dropping them would create false
+    # "missing dependency" findings, so keep one representative per key.
+    edge_index = representative_index(edge_buckets)
     return SideComparisonIndex(
         node_index=node_index,
         node_collisions=collision_payload(node_buckets),
@@ -70,6 +190,10 @@ def build_side_indexes(graph: Graph, mapping: MappingConfig, left: bool, mapping
 
 def single_item_index(buckets: dict[str, list[Any]]) -> dict[str, Any]:
     return {key: items[0] for key, items in buckets.items() if len(items) == 1}
+
+
+def representative_index(buckets: dict[str, list[Any]]) -> dict[str, Any]:
+    return {key: sorted(items, key=lambda item: item.id)[0] for key, items in buckets.items() if items}
 
 
 def compare_matched_attributes(matched_keys: set[str], sb_nodes: dict[str, Node], jil_nodes: dict[str, Node]) -> dict[str, list[dict[str, Any]]]:
@@ -208,6 +332,11 @@ def build_risks(comparison: Comparison) -> list[str]:
         risks.append("Matched objects have command syntax differences only after variable/environment/script-path normalization.")
     if s.get("condition_differences", 0):
         risks.append("Matched objects have different condition hashes.")
+    if s.get("relaxed_dependency_matches", 0):
+        risks.append(
+            "Some dependencies matched only at the dependency-family level "
+            "(one side has an unspecified condition). Verify the condition types manually."
+        )
     if s.get("critical_dependency_loss_count", 0):
         risks.append("Critical JIL dependency edges are missing in Stonebranch.")
     if s.get("calendar_mismatch_count", 0):

@@ -15,8 +15,11 @@ def write_report(path: Path, comparison: Comparison) -> None:
         f"- Stonebranch edges: **{s.get('stonebranch_edges', 0)}**",
         f"- JIL edges: **{s.get('jil_edges', 0)}**",
         f"- Matched edges: **{s.get('matched_edges', 0)}**",
+        f"- Relaxed dependency matches (condition unspecified on one side): **{s.get('relaxed_dependency_matches', 0)}**",
         f"- Missing edges in Stonebranch: **{s.get('missing_edges_in_stonebranch', 0)}**",
-        f"- Missing edges in JIL: **{s.get('missing_edges_in_jil', 0)}**", "", "## Migration metrics", "",
+        f"- Missing edges in JIL: **{s.get('missing_edges_in_jil', 0)}**",
+        f"- Stonebranch-only objects (no JIL equivalent kind, informational): **{s.get('stonebranch_only_nodes', 0)}**",
+        f"- Stonebranch-only edges (no JIL equivalent relation, informational): **{s.get('stonebranch_only_edges', 0)}**", "", "## Migration metrics", "",
         f"- Migration readiness score: **{s.get('migration_readiness_score', 0)}/100** (`{s.get('readiness_grade', 'unknown')}`)",
         f"- Node match rate: **{s.get('node_match_rate_percent', 0)}%**",
         f"- Edge match rate: **{s.get('edge_match_rate_percent', 0)}%**",
@@ -46,7 +49,21 @@ def write_report(path: Path, comparison: Comparison) -> None:
     lines += ["", "## Missing dependencies in JIL", "", "| Relation | Source | Target | Evidence |", "|---|---|---|---|"]
     for item in comparison.edges.get("missing_in_jil", [])[:200]:
         lines.append(f"| {item['relation']} | `{item['source'].get('name', item['source'].get('id'))}` | `{item['target'].get('name', item['target'].get('id'))}` | `{item['evidence_file']}` |")
+    append_stonebranch_only_sections(lines, comparison)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def append_stonebranch_only_sections(lines: list[str], comparison: Comparison) -> None:
+    only_nodes = comparison.nodes.get("stonebranch_only", [])
+    only_edges = comparison.edges.get("stonebranch_only", [])
+    if only_nodes:
+        lines += ["", "## Stonebranch-only objects (informational)", "", "| Kind | Object | Stonebranch source |", "|---|---|---|"]
+        for item in only_nodes[:200]:
+            lines.append(f"| {item['kind']} | `{item['name']}` | `{item['source_file']}` |")
+    if only_edges:
+        lines += ["", "## Stonebranch-only edges (informational)", "", "| Relation | Source | Target | Evidence |", "|---|---|---|---|"]
+        for item in only_edges[:200]:
+            lines.append(f"| {item['relation']} | `{item['source'].get('name', item['source'].get('id'))}` | `{item['target'].get('name', item['target'].get('id'))}` | `{item['evidence_file']}` |")
 
 
 def append_command_normalization_section(lines: list[str], comparison: Comparison) -> None:

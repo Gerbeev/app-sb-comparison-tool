@@ -5,7 +5,7 @@ from typing import Any
 
 from stonebranch_graph.config import AnalyzerConfig
 from stonebranch_graph.core import Edge, Graph, make_edge_id, make_node_id, redacted_preview
-from stonebranch_graph.domain import SOURCE_STONEBRANCH
+from stonebranch_graph.domain import KIND_TASK, KIND_WORKFLOW, REL_CONTAINS, SOURCE_STONEBRANCH
 from stonebranch_graph.parsers.stonebranch_discovery import (
     detect_object_name,
     env_from_path,
@@ -17,7 +17,12 @@ from stonebranch_graph.parsers.stonebranch_discovery import (
     object_metadata,
 )
 from stonebranch_graph.parsers.stonebranch_registry import build_registry, resolve_or_create_ref_node
-from stonebranch_graph.parsers.stonebranch_relations import directed_relation, find_stonebranch_references, kind_from_relation
+from stonebranch_graph.parsers.stonebranch_relations import (
+    directed_relation,
+    extract_workflow_structure,
+    find_stonebranch_references,
+    kind_from_relation,
+)
 
 
 class StonebranchJsonParser:
@@ -105,6 +110,8 @@ class StonebranchJsonParser:
     ) -> None:
         for _, relative_path, env, source_kind, source_name, data in records:
             source_id = make_node_id(SOURCE_STONEBRANCH, env, source_kind, source_name)
+            if source_kind == KIND_WORKFLOW:
+                self._add_workflow_structure_edges(graph, registry, env, source_id, relative_path, data)
             for ref_value, native_relation, relation, evidence_path, evidence_key, evidence_value in find_stonebranch_references(
                 data,
                 source_kind,
@@ -143,6 +150,86 @@ class StonebranchJsonParser:
                         confidence=0.95 if native_relation != "deep_scan_reference" else 0.55,
                     )
                 )
+
+    def _add_workflow_structure_edges(
+        self,
+        graph: Graph,
+        registry: dict[str, dict],
+        env: str,
+        workflow_id: str,
+        relative_path: str,
+        data: dict,
+    ) -> None:
+        structure = extract_workflow_structure(data)
+        for warning in structure.warnings:
+            self._append_warning_once(graph, f"{warning} ({relative_path})")
+
+        for task_name, evidence_path in structure.vertex_tasks:
+            target_id = self._resolve_task_like(graph, registry, env, task_name, "workflow_vertex", relative_path)
+            graph.add_edge(
+                Edge(
+                    # Keep the contains_task native relation so a containment edge
+                    # discovered both from a tasks list and from workflowVertices
+                    # deduplicates into a single edge.
+                    id=make_edge_id(workflow_id, target_id, REL_CONTAINS, "contains_task"),
+                    source=workflow_id,
+                    target=target_id,
+                    relation=REL_CONTAINS,
+                    source_system=SOURCE_STONEBRANCH,
+                    native_relation="contains_task",
+                    evidence_file=relative_path,
+                    evidence_path=evidence_path,
+                    evidence_key="workflowVertices",
+                    evidence_value=redacted_preview(task_name, self.config.max_evidence_value_len),
+                    confidence=0.95,
+                )
+            )
+
+        for dependency in structure.dependencies:
+            predecessor_id = self._resolve_task_like(graph, registry, env, dependency.predecessor, "workflow_edge", relative_path)
+            successor_id = self._resolve_task_like(graph, registry, env, dependency.successor, "workflow_edge", relative_path)
+            native_relation = f"workflow_edge_{dependency.condition.strip().lower().replace(' ', '_').replace('/', '_')}"
+            graph.add_edge(
+                Edge(
+                    id=make_edge_id(successor_id, predecessor_id, dependency.relation, native_relation),
+                    # AutoSys condition edges point dependent -> prerequisite, so the
+                    # workflow edge target (successor) depends on the source (predecessor).
+                    source=successor_id,
+                    target=predecessor_id,
+                    relation=dependency.relation,
+                    source_system=SOURCE_STONEBRANCH,
+                    native_relation=native_relation,
+                    evidence_file=relative_path,
+                    evidence_path=dependency.evidence_path,
+                    evidence_key="workflowEdges",
+                    evidence_value=redacted_preview(
+                        f"{dependency.predecessor} -[{dependency.condition}]-> {dependency.successor}",
+                        self.config.max_evidence_value_len,
+                    ),
+                    confidence=0.95,
+                )
+            )
+
+    def _resolve_task_like(
+        self,
+        graph: Graph,
+        registry: dict[str, dict],
+        env: str,
+        name: str,
+        native_relation: str,
+        relative_path: str,
+    ) -> str:
+        return resolve_or_create_ref_node(
+            graph=graph,
+            registry=registry,
+            config=self.config,
+            env=env,
+            target_kind=KIND_TASK,
+            target_name=name,
+            native_relation=native_relation,
+            source_file=relative_path,
+            append_warning=self._append_warning_once,
+        )
 
     def _append_warning_once(self, graph: Graph, warning: str) -> None:
         if warning not in graph.warnings:

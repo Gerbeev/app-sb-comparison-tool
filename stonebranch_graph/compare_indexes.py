@@ -12,6 +12,9 @@ def write_diff_index(compare_dir: Path, comparison: Comparison) -> None:
         "missing_in_jil": comparison.nodes.get("missing_in_jil", []),
         "missing_edges_in_stonebranch": comparison.edges.get("missing_in_stonebranch", []),
         "missing_edges_in_jil": comparison.edges.get("missing_in_jil", []),
+        "relaxed_dependency_matches": comparison.edges.get("matched_relaxed", []),
+        "stonebranch_only_objects": comparison.nodes.get("stonebranch_only", []),
+        "stonebranch_only_edges": comparison.edges.get("stonebranch_only", []),
         "command_differences": comparison.attributes.get("command_differences", []),
         "condition_differences": comparison.attributes.get("condition_differences", []),
     }

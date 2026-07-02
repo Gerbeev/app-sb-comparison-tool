@@ -2,10 +2,19 @@ from __future__ import annotations
 
 from stonebranch_graph.config import AnalyzerConfig
 from stonebranch_graph.core import Graph, make_node_id
-from stonebranch_graph.domain import KIND_COMMAND
+from stonebranch_graph.domain import KIND_COMMAND, KIND_TASK, KIND_WORKFLOW
 from stonebranch_graph.parsers.stonebranch_discovery import make_stonebranch_node
 
 Registry = dict[str, dict]
+
+# In Universal Controller a workflow is itself a task, so a task-typed reference
+# (trigger taskName, workflow vertex, predecessor/successor) may legitimately
+# point at a workflow, and vice versa. Resolving across both kinds mirrors the
+# JIL parser, which resolves condition references across task/box/file_watcher.
+ALTERNATIVE_KINDS = {
+    KIND_TASK: (KIND_WORKFLOW,),
+    KIND_WORKFLOW: (KIND_TASK,),
+}
 
 
 def build_registry(graph: Graph) -> Registry:
@@ -33,6 +42,11 @@ def resolve_or_create_ref_node(
     existing = registry["by_kind"].get((env, target_kind, target_name.lower()))
     if existing:
         return existing
+
+    for alternative_kind in ALTERNATIVE_KINDS.get(target_kind, ()):
+        alternative = registry["by_kind"].get((env, alternative_kind, target_name.lower()))
+        if alternative:
+            return alternative
 
     same_name_matches = set(registry["by_name"].get((env, target_name.lower()), set()))
     if len(same_name_matches) == 1:
