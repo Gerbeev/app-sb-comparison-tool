@@ -1,10 +1,23 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .config import MappingConfig
 from .core import Edge, Graph, Node, comparison_name, normalize_name
-from .domain import KIND_BOX, KIND_WORKFLOW, KNOWN_SOURCE_SYSTEMS, REL_CONTAINS, REL_DEPENDS_ON_SUCCESS, REL_SUCCESSOR_OF
+from .domain import (
+    KIND_AGENT,
+    KIND_AGENT_CLUSTER,
+    KIND_BOX,
+    KIND_OBJECT,
+    KIND_WORKFLOW,
+    KNOWN_SOURCE_SYSTEMS,
+    REL_CONTAINS,
+    REL_DEPENDS_ON_SUCCESS,
+    REL_RUNS_ON,
+    REL_RUNS_ON_CLUSTER,
+    REL_SUCCESSOR_OF,
+)
 
 def comparison_node_key(node: Node, mapping: MappingConfig, left: bool, mapping_usage: set[str] | None = None) -> str:
     if left:
@@ -56,10 +69,26 @@ def comparison_kind(kind: str) -> str:
     AutoSys boxes and Stonebranch workflows represent the same containment
     concept in migration analysis, so compare them as box-like containers while
     preserving the original node kind in graph.json and reports.
+
+    AutoSys machines are commonly migrated to Stonebranch agent clusters, so
+    agents and agent clusters compare as the same runtime-target concept.
     """
     if kind == KIND_WORKFLOW:
         return KIND_BOX
+    if kind == KIND_AGENT_CLUSTER:
+        return KIND_AGENT
     return kind
+
+
+# Relations unified for cross-system comparison. runs_on_cluster is the
+# Stonebranch counterpart of the AutoSys machine relation (runs_on).
+COMPARISON_RELATION_ALIASES = {
+    REL_RUNS_ON_CLUSTER: REL_RUNS_ON,
+}
+
+
+def comparison_relation(relation: str) -> str:
+    return COMPARISON_RELATION_ALIASES.get(relation, relation)
 
 
 def comparison_edge_key(edge: Edge, graph: Graph, mapping: MappingConfig, left: bool, mapping_usage: set[str] | None = None) -> str:
@@ -67,6 +96,7 @@ def comparison_edge_key(edge: Edge, graph: Graph, mapping: MappingConfig, left: 
     if components is None:
         return f"broken:{edge.id}"
     source, relation, target = components
+    relation = comparison_relation(relation)
     return f"{comparison_node_key(source, mapping, left, mapping_usage)}->{relation}->{comparison_node_key(target, mapping, left, mapping_usage)}"
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from stonebranch_graph.config import AnalyzerConfig
@@ -21,6 +22,8 @@ from stonebranch_graph.domain import (
     KIND_WORKFLOW,
     REL_CONTAINS,
     REL_DEPENDS_ON,
+    REL_DEPENDS_ON_DONE,
+    REL_DEPENDS_ON_FAILURE,
     REL_DEPENDS_ON_SUCCESS,
     REL_REFERENCES,
     REL_RUNS_COMMAND,
