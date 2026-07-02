@@ -245,11 +245,9 @@ This writes:
 <OUTPUT>/compare-pack/compare/triage-report.md
 <OUTPUT>/compare-pack/compare/triage-findings.csv
 <OUTPUT>/compare-pack/compare/triage-summary.json
-<OUTPUT>/compare-pack/compare/triage-fix-plan.md
-<OUTPUT>/compare-pack/compare/triage-fix-plan.csv
 ```
 
-Use the triage files to classify findings before fixing them. `triage-findings.csv` now includes `suggested_fix_type`, `owner`, and `next_action`; `triage-fix-plan.csv` groups those findings into a prioritized follow-up backlog:
+Use the triage files to classify findings before fixing them:
 
 ```text
 enterprise_naming_collision   naming collision; review mappings before trusting match rates
@@ -260,18 +258,6 @@ condition_mismatch            matched object has different condition hash
 object_gap                    missing object or retired/unmapped object
 parser_or_comparison_warning  warning from run.log
 workflow_error                error from run.log; fix before trusting reports
-
-Suggested fix types include:
-
-```text
-manual_mapping_or_naming_rule          collision or naming problem; resolve before trusting match rates
-relation_parser_or_real_gap_triage     edge gap; verify evidence before changing parser rules
-command_normalization_rule_candidate   syntax-only command difference; candidate for safe normalization
-real_command_migration_gap             semantic command mismatch; application owner review needed
-condition_parser_or_logic_gap          condition logic mismatch; parser or migration logic review
-parser_rule_candidate                  repeated run.log warning; candidate for a small parser fixture/fix
-object_mapping_or_scope_decision       object exists on one side only; map, create, retire, or mark out of scope
-```
 ```
 
 Recommended triage order:
@@ -286,18 +272,7 @@ Recommended triage order:
 7) run.log parser/comparison warnings
 ```
 
-## 7) Post-dry-run fix backlog
-
-Use the generated fix plan as the first backlog after a real run:
-
-```text
-triage-fix-plan.md   human-readable prioritized backlog
-triage-fix-plan.csv  Excel-friendly owner/action table
-```
-
-Treat this as a conservative guide: every parser or normalization change should be backed by a small sanitized fixture before implementation.
-
-## 8) Minimum acceptance checklist
+## 7) Minimum acceptance checklist
 
 Before using the result as a migration baseline, confirm:
 
@@ -313,7 +288,7 @@ Before using the result as a migration baseline, confirm:
 [ ] remediation-plan.md has been reviewed as the working cleanup checklist.
 ```
 
-## 9) What to send back for tool improvement
+## 8) What to send back for tool improvement
 
 When real data exposes a parsing or matching issue, collect a small sanitized case:
 

@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .artifacts import TRIAGE_OUTPUT_FILE_NAMES, triage_output_files
 from .domain import PACK_CRITICAL_RELATIONS
 from .exporters import export_csv_rows, write_json, write_text_file
 
@@ -24,24 +23,9 @@ TRIAGE_FIELDS = [
     "review_file",
     "reason",
     "details",
-    "suggested_fix_type",
-    "owner",
-    "next_action",
 ]
 
-TRIAGE_FIX_PLAN_FIELDS = [
-    "priority",
-    "suggested_fix_type",
-    "owner",
-    "category",
-    "finding_count",
-    "severity",
-    "review_files",
-    "recommended_action",
-    "why",
-]
-
-TRIAGE_OUTPUT_FILES = TRIAGE_OUTPUT_FILE_NAMES
+TRIAGE_OUTPUT_FILES = ["triage-report.md", "triage-findings.csv", "triage-summary.json"]
 
 
 @dataclass(frozen=True)
@@ -66,121 +50,9 @@ class TriageFinding:
     review_file: str = ""
     reason: str = ""
     details: str = ""
-    suggested_fix_type: str = ""
-    owner: str = ""
-    next_action: str = ""
 
     def to_row(self) -> dict[str, str]:
         return {field: str(getattr(self, field)) for field in TRIAGE_FIELDS}
-
-
-@dataclass(frozen=True)
-class FixGuidance:
-    suggested_fix_type: str
-    owner: str
-    next_action: str
-
-    def as_dict(self) -> dict[str, str]:
-        return {
-            "suggested_fix_type": self.suggested_fix_type,
-            "owner": self.owner,
-            "next_action": self.next_action,
-        }
-
-
-DEFAULT_FIX_GUIDANCE = FixGuidance(
-    suggested_fix_type="manual_review",
-    owner="migration_team",
-    next_action="Review the finding and decide whether it is a tool issue or a real migration gap.",
-)
-
-TRIAGE_FIX_RULES: dict[str, FixGuidance] = {
-    "enterprise_naming_collision": FixGuidance(
-        suggested_fix_type="manual_mapping_or_naming_rule",
-        owner="migration_analyst",
-        next_action="Resolve the collision before trusting match rates; add a mapping rule or tighten enterprise naming rules.",
-    ),
-    "normalized_key_collision": FixGuidance(
-        suggested_fix_type="manual_mapping_or_naming_rule",
-        owner="migration_analyst",
-        next_action="Review objects sharing the same normalized key and decide whether mapping or naming normalization must change.",
-    ),
-    "critical_edge_gap": FixGuidance(
-        suggested_fix_type="relation_parser_or_real_gap_triage",
-        owner="migration_engineer",
-        next_action="Check edge evidence first; if the source system really contains the edge, add/adjust a parser relation rule.",
-    ),
-    "edge_gap": FixGuidance(
-        suggested_fix_type="relation_parser_or_real_gap_triage",
-        owner="migration_engineer",
-        next_action="Review edge evidence and classify it as parser normalization gap or accepted platform difference.",
-    ),
-    "object_gap": FixGuidance(
-        suggested_fix_type="object_mapping_or_scope_decision",
-        owner="migration_analyst",
-        next_action="Confirm whether the object is in scope, retired, synthetic, or needs a mapping rule.",
-    ),
-    "command_syntax_mapping": FixGuidance(
-        suggested_fix_type="command_normalization_rule_candidate",
-        owner="migration_engineer",
-        next_action="Review variable/env/script-path syntax and extend safe command normalization only when examples are equivalent.",
-    ),
-    "command_semantic_mismatch": FixGuidance(
-        suggested_fix_type="real_command_migration_gap",
-        owner="application_owner",
-        next_action="Compare command behavior with the application owner; do not hide this with normalization until confirmed equivalent.",
-    ),
-    "condition_mismatch": FixGuidance(
-        suggested_fix_type="condition_parser_or_logic_gap",
-        owner="migration_engineer",
-        next_action="Compare condition logic and add parser support only when the scheduler semantics are equivalent.",
-    ),
-    "mapping_rule_issue": FixGuidance(
-        suggested_fix_type="mapping_file_cleanup",
-        owner="migration_analyst",
-        next_action="Remove, rename, or correct unused mapping rules after checking current object names.",
-    ),
-    "parser_or_comparison_warning": FixGuidance(
-        suggested_fix_type="parser_rule_candidate",
-        owner="tooling_engineer",
-        next_action="Group repeated warnings by source pattern and add parser support with regression fixtures.",
-    ),
-    "workflow_error": FixGuidance(
-        suggested_fix_type="input_or_runtime_fix",
-        owner="tooling_engineer",
-        next_action="Fix the logged error before trusting any comparison outputs from this run.",
-    ),
-    "readiness_score": FixGuidance(
-        suggested_fix_type="summary_gate",
-        owner="migration_lead",
-        next_action="Use high-priority findings to decide whether another dry run is needed before migration review.",
-    ),
-}
-
-TRIAGE_CATEGORY_ORDER: dict[str, int] = {
-    "enterprise_naming_collision": 0,
-    "normalized_key_collision": 1,
-    "workflow_error": 2,
-    "critical_edge_gap": 3,
-    "command_semantic_mismatch": 4,
-    "condition_mismatch": 5,
-    "object_gap": 6,
-    "command_syntax_mapping": 7,
-    "parser_or_comparison_warning": 8,
-    "mapping_rule_issue": 9,
-    "readiness_score": 10,
-}
-
-TRIAGE_REVIEW_ORDER: tuple[tuple[str, str], ...] = (
-    ("enterprise_naming_collision", "Review collisions.csv and create/adjust manual mappings before trusting match rates."),
-    ("normalized_key_collision", "Review normalized-key collisions before trusting missing-object counts."),
-    ("critical_edge_gap", "Review critical edge gaps in edge-diff.csv."),
-    ("command_semantic_mismatch", "Review real command mismatches in command-diff.csv."),
-    ("condition_mismatch", "Review condition hash mismatches."),
-    ("object_gap", "Review object gaps after collisions and critical edges are understood."),
-    ("command_syntax_mapping", "Review syntax-only command differences as variable/env/script-path mapping checks."),
-    ("parser_or_comparison_warning", "Review run.log warnings for parser/matching improvements."),
-)
 
 
 def create_triage_report(compare_output: Path, output_dir: Path | None = None) -> TriageResult:
@@ -192,14 +64,11 @@ def create_triage_report(compare_output: Path, output_dir: Path | None = None) -
     metrics = load_json_file(compare_dir / "metrics.json")
     findings = collect_triage_findings(compare_dir, comparison, metrics)
     summary = build_triage_summary(findings, comparison, metrics)
-    fix_plan = build_triage_fix_plan(findings)
 
     write_json(output / "triage-summary.json", summary)
     export_csv_rows(output / "triage-findings.csv", TRIAGE_FIELDS, (finding.to_row() for finding in findings))
-    export_csv_rows(output / "triage-fix-plan.csv", TRIAGE_FIX_PLAN_FIELDS, fix_plan)
     write_text_file(output / "triage-report.md", render_triage_report(findings, summary))
-    write_text_file(output / "triage-fix-plan.md", render_triage_fix_plan(fix_plan, summary))
-    return TriageResult(compare_dir=compare_dir, output_dir=output, summary=summary, files=triage_output_files(output))
+    return TriageResult(compare_dir=compare_dir, output_dir=output, summary=summary, files=[output / name for name in TRIAGE_OUTPUT_FILES])
 
 
 def resolve_compare_dir(path: Path) -> Path:
@@ -227,7 +96,7 @@ def collect_triage_findings(compare_dir: Path, comparison: dict[str, Any], metri
     findings.extend(mapping_findings(comparison))
     findings.extend(log_findings(compare_dir))
     findings.extend(readiness_findings(metrics or comparison.get("summary", {})))
-    return sorted((with_fix_guidance(finding) for finding in findings), key=finding_sort_key)
+    return sorted(findings, key=finding_sort_key)
 
 
 def finding_sort_key(finding: TriageFinding) -> tuple[int, str, str, str, str]:
@@ -439,110 +308,31 @@ def readiness_findings(metrics: dict[str, Any]) -> list[TriageFinding]:
 def build_triage_summary(findings: list[TriageFinding], comparison: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
     by_category = Counter(finding.category for finding in findings)
     by_severity = Counter(finding.severity for finding in findings)
-    by_fix_type = Counter(finding.suggested_fix_type for finding in findings if finding.suggested_fix_type)
     high_priority = [finding for finding in findings if finding.severity in {"critical", "high"}]
     return {
         "finding_count": len(findings),
         "high_priority_count": len(high_priority),
         "by_category": dict(sorted(by_category.items())),
         "by_severity": dict(sorted(by_severity.items())),
-        "by_suggested_fix_type": dict(sorted(by_fix_type.items())),
         "migration_readiness_score": metrics.get("migration_readiness_score", comparison.get("summary", {}).get("migration_readiness_score")),
         "readiness_grade": metrics.get("readiness_grade", comparison.get("summary", {}).get("readiness_grade")),
         "next_review_order": next_review_order(findings),
     }
 
 
-def with_fix_guidance(finding: TriageFinding) -> TriageFinding:
-    if finding.suggested_fix_type and finding.owner and finding.next_action:
-        return finding
-    guidance = fix_guidance_for(finding.category)
-    return replace(
-        finding,
-        suggested_fix_type=finding.suggested_fix_type or guidance.suggested_fix_type,
-        owner=finding.owner or guidance.owner,
-        next_action=finding.next_action or guidance.next_action,
-    )
-
-
-def fix_guidance_for(category: str) -> FixGuidance:
-    return TRIAGE_FIX_RULES.get(category, DEFAULT_FIX_GUIDANCE)
-
-
-def build_triage_fix_plan(findings: list[TriageFinding]) -> list[dict[str, str]]:
-    grouped: dict[tuple[str, str, str], list[TriageFinding]] = {}
-    for finding in findings:
-        key = (finding.suggested_fix_type, finding.owner, finding.category)
-        grouped.setdefault(key, []).append(finding)
-
-    rows: list[dict[str, str]] = []
-    for priority, ((fix_type, owner, category), items) in enumerate(sorted(grouped.items(), key=fix_plan_sort_key), start=1):
-        severities = sorted({item.severity for item in items}, key=severity_rank)
-        review_files = sorted({item.review_file for item in items if item.review_file})
-        next_actions = sorted({item.next_action for item in items if item.next_action})
-        reasons = sorted({item.reason for item in items if item.reason})
-        rows.append(
-            {
-                "priority": str(priority),
-                "suggested_fix_type": fix_type,
-                "owner": owner,
-                "category": category,
-                "finding_count": str(len(items)),
-                "severity": severities[0] if severities else "",
-                "review_files": ";".join(review_files),
-                "recommended_action": next_actions[0] if next_actions else "Review findings in triage-findings.csv.",
-                "why": reasons[0] if reasons else "Generated from dry-run triage findings.",
-            }
-        )
-    return rows
-
-
-def fix_plan_sort_key(item: tuple[tuple[str, str, str], list[TriageFinding]]) -> tuple[int, str, str]:
-    (_, _, category), findings = item
-    best_severity = min((severity_rank(finding.severity) for finding in findings), default=99)
-    return (best_severity, TRIAGE_CATEGORY_ORDER.get(category, 99), category)
-
-
-def severity_rank(severity: str) -> int:
-    return {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}.get(severity, 99)
-
-
-def render_triage_fix_plan(rows: list[dict[str, str]], summary: dict[str, Any]) -> str:
-    lines = [
-        "# Dry-run fix plan",
-        "",
-        "This file turns triage findings into a prioritized follow-up backlog. It is intentionally conservative: confirm with source evidence before changing parser or normalization rules.",
-        "",
-        "## Summary",
-        "",
-        f"- Findings: **{summary.get('finding_count', 0)}**",
-        f"- High priority: **{summary.get('high_priority_count', 0)}**",
-        f"- Migration readiness score: **{summary.get('migration_readiness_score', 'n/a')}**",
-        "",
-        "## Fix backlog",
-        "",
-        "| Priority | Fix type | Owner | Category | Count | Action |",
-        "|---:|---|---|---|---:|---|",
-    ]
-    for row in rows:
-        lines.append(
-            "| {priority} | `{suggested_fix_type}` | `{owner}` | `{category}` | {finding_count} | {action} |".format(
-                priority=row.get("priority", ""),
-                suggested_fix_type=escape_table(row.get("suggested_fix_type", "")),
-                owner=escape_table(row.get("owner", "")),
-                category=escape_table(row.get("category", "")),
-                finding_count=row.get("finding_count", ""),
-                action=escape_table(row.get("recommended_action", "")),
-            )
-        )
-    lines.extend(["", "## CSV export", "", "Use `triage-fix-plan.csv` for filtering and assigning follow-up work.", ""])
-    return "\n".join(lines)
-
-
 def next_review_order(findings: list[TriageFinding]) -> list[str]:
     categories = {finding.category for finding in findings}
-    messages = [message for category, message in TRIAGE_REVIEW_ORDER if category in categories]
-    return messages or ["No triage findings were generated from the available comparison outputs."]
+    order = [
+        ("enterprise_naming_collision", "Review collisions.csv and create/adjust manual mappings before trusting match rates."),
+        ("normalized_key_collision", "Review normalized-key collisions before trusting missing-object counts."),
+        ("critical_edge_gap", "Review critical edge gaps in edge-diff.csv."),
+        ("command_semantic_mismatch", "Review real command mismatches in command-diff.csv."),
+        ("condition_mismatch", "Review condition hash mismatches."),
+        ("object_gap", "Review object gaps after collisions and critical edges are understood."),
+        ("command_syntax_mapping", "Review syntax-only command differences as variable/env/script-path mapping checks."),
+        ("parser_or_comparison_warning", "Review run.log warnings for parser/matching improvements."),
+    ]
+    return [message for category, message in order if category in categories] or ["No triage findings were generated from the available comparison outputs."]
 
 
 def render_triage_report(findings: list[TriageFinding], summary: dict[str, Any]) -> str:

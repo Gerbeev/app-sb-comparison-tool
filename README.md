@@ -69,7 +69,7 @@ This lets you see what is configured, what has already been generated, and what 
 
 ### 1) Build Stonebranch analysis pack
 
-Creates a self-contained folder with graph, indexes, Mermaid views, metrics, and reports.
+Creates a self-contained folder with graph, workflow/box container views, canonical diff-friendly JSON, an offline interactive HTML graph report, indexes, metrics, and reports. Legacy Mermaid `.mmd` views are obsolete and disabled by default.
 
 ```cmd
 stonebranch-graph build-stonebranch-pack "C:\path\to\sb-orchestrator\envs\PROD" -o out\stonebranch-pack --env PROD --include-raw-values
@@ -97,12 +97,6 @@ Then generate the dry-run triage files:
 python -m stonebranch_graph.cli triage out\compare-pack
 ```
 
-## Artifact output contracts
-
-Generated file lists are centralized in `stonebranch_graph/artifacts.py`. Workflow results, compare-pack manifests, triage outputs, and baseline documentation should use those contracts instead of duplicating artifact lists in multiple modules. Triage fix guidance is rule-driven through `TRIAGE_FIX_RULES` in `stonebranch_graph/triage.py`, so future dry-run finding categories can be extended without growing long conditional chains.
-
-Comparison logic is split into focused modules (`compare_engine.py`, `compare_keys.py`, `compare_payloads.py`, `compare_diagnostics.py`, `compare_report.py`, `compare_csv_exports.py`, `compare_remediation.py`, and `compare_overlay.py`). Keep `stonebranch_graph.compare` as the public compatibility facade for existing imports.
-
 ## Real repository dry run
 
 Before treating comparison numbers as a migration baseline, run the real-repository dry-run checklist:
@@ -111,13 +105,7 @@ Before treating comparison numbers as a migration baseline, run the real-reposit
 docs/REAL_REPOSITORY_DRY_RUN.md
 ```
 
-The final QA baseline and exact output contracts are summarized in:
-
-```text
-docs/QA_BASELINE.md
-```
-
-It explains the recommended first run, which logs and reports to inspect first, and how to generate triage outputs for collisions, edge diffs, command diffs, parser warnings, remediation items, and the post-dry-run fix backlog.
+It explains the recommended first run, which logs and reports to inspect first, and how to generate triage outputs for collisions, edge diffs, command diffs, parser warnings, and remediation items.
 
 ## Source analysis pack contents
 
@@ -127,11 +115,17 @@ Both Stonebranch and JIL packs contain:
 README.md
 pack-manifest.json
 graph.json
+canonical-graph.json
+graph.html
+graph-data.js
+cytoscape.min.js
+cytoscape.LICENSE
+containers.json
+containers.csv
 metrics.json
 metrics.csv
 objects.csv
 edges.csv
-dependency-graph.mmd
 dependency-graph.dot
 report.md
 run.log
@@ -143,13 +137,7 @@ indexes/
   reverse-adjacency.json
 
 graphs/
-  full.mmd
-  tasks-only.mmd
-  dependencies-only.mmd
-  triggers-to-tasks.mmd
-  runtime.mmd
-  calendars.mmd
-  variables.mmd
+  README.md
 
 reports/
   top-connected.md
@@ -158,14 +146,15 @@ reports/
   object-summary.csv
 ```
 
-`graph.json` is the source of truth. Indexes and graph views are generated from it.
+Mermaid `.mmd` graph exports are obsolete and disabled by default because large production repositories are hard to render and navigate in Mermaid. Use `graph.html` for the offline interactive HTML graph view powered by bundled Cytoscape.js, and use `canonical-graph.json`, `containers.json`, `objects.csv`, and `edges.csv` for deterministic review and diff tools.
+
+
+`graph.json` is the source of truth. `graph.html` is the offline interactive HTML graph report generated from `graph-data.js` and the bundled `cytoscape.min.js` runtime. `canonical-graph.json` is the deterministic sorted graph projection for diff tools. `containers.json` is the workflow/box group projection: workflows/boxes are groups and tasks/jobs are children. Stonebranch dependency definition files are not exported as dependency nodes; they are normalized into task-to-task dependency edges with the original dependency file kept as edge evidence. Indexes and graph views are generated from the graph data.
 
 ## Comparison analysis pack contents
 
-Created by `compare-packs`, `compare`, or `compare-json`:
-
 ```text
-compare-pack-manifest.json   # compare-packs only
+compare-pack-manifest.json
 run.log
 
 compare/
@@ -175,46 +164,20 @@ compare/
   metrics.csv
   edge-diff.csv
   command-diff.csv
+  compare-graph.html
+  compare-graph-data.js
+  cytoscape.min.js
+  cytoscape.LICENSE
+  triage-report.md        # created by: python -m stonebranch_graph.cli triage <compare-pack>
+  triage-findings.csv     # created by: python -m stonebranch_graph.cli triage <compare-pack>
+  triage-summary.json     # created by: python -m stonebranch_graph.cli triage <compare-pack>
   missing-in-stonebranch.csv
   missing-in-jil.csv
   collisions.csv
   mapping-diagnostics.csv
   diff-index.json
   critical-diff.json
-  remediation-summary.json
   remediation-plan.md
-  overlay-graph.mmd
-```
-
-Created by `python -m stonebranch_graph.cli triage <compare-pack>`:
-
-```text
-compare/
-  triage-report.md
-  triage-findings.csv
-  triage-summary.json
-  triage-fix-plan.md
-  triage-fix-plan.csv
-```
-
-Exact comparison output contract:
-
-```text
-compare/report.md
-compare/comparison.json
-compare/metrics.json
-compare/metrics.csv
-compare/edge-diff.csv
-compare/command-diff.csv
-compare/missing-in-stonebranch.csv
-compare/missing-in-jil.csv
-compare/collisions.csv
-compare/mapping-diagnostics.csv
-compare/diff-index.json
-compare/critical-diff.json
-compare/remediation-summary.json
-compare/remediation-plan.md
-compare/overlay-graph.mmd
 ```
 
 Start with:
@@ -478,4 +441,15 @@ The tool auto-fills:
 <base>\compare-pack
 ```
 
-Parser internals are split into focused helper modules under `stonebranch_graph/parsers/` while the public parser imports remain stable.
+
+## QA20.7 comparison HTML graph
+
+Comparison packs now include `compare/compare-graph.html`, `compare/compare-graph-data.js`, and local `compare/cytoscape.min.js`, an offline Cytoscape visual overlay for matched, missing, critical, and command/condition-difference statuses.
+
+## QA20.8 large graph HTML usability
+
+`graph.html` and `compare/compare-graph.html` now include status filters and quick buttons for `Problems`, `Critical`, `Missing`, and `Show all`. The side panel shows current visible node/edge counts and comparison status counts, which helps narrow very large workflow/job graphs before expanding all groups.
+
+## QA20.9 HTML side panel evidence and deep links
+
+`graph.html` and `compare/compare-graph.html` now show copyable node IDs, graph IDs, edge keys, evidence fields, and source/target navigation in the side panel. Selecting a node or edge updates the URL hash, so a focused view can be reopened or shared locally.

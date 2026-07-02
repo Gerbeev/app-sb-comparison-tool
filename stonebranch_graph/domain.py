@@ -67,26 +67,3 @@ PACK_CRITICAL_RELATIONS = (
     | {REL_CONTAINS, REL_STARTS, REL_USES_CALENDAR, REL_RUNS_ON, REL_RUNS_ON_CLUSTER}
     | COMMAND_RELATIONS
 )
-
-# Object kinds that only exist in Stonebranch exports and can never have an
-# AutoSys JIL counterpart. During comparison they are reported in a separate
-# informational bucket instead of being counted as migration mismatches.
-STONEBRANCH_ONLY_KINDS = {
-    KIND_TRIGGER,
-    KIND_CREDENTIAL,
-    KIND_CONNECTION,
-    KIND_SCRIPT,
-    KIND_EMAIL_TEMPLATE,
-    KIND_OBJECT,
-}
-
-# Relations that the JIL parser can never produce. Stonebranch-extra edges with
-# these relations are informational, not comparison mismatches.
-STONEBRANCH_ONLY_RELATIONS = {
-    REL_STARTS,
-    REL_USES_CREDENTIAL,
-    REL_USES_CONNECTION,
-    REL_USES_EMAIL_TEMPLATE,
-    REL_RUNS_SCRIPT,
-    REL_REFERENCES,
-}

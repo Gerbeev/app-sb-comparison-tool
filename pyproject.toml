@@ -51,3 +51,5 @@ line-ending = "auto"
 [tool.setuptools.packages.find]
 include = ["stonebranch_graph*"]
 
+[tool.setuptools.package-data]
+stonebranch_graph = ["assets/*.js", "assets/*.LICENSE"]

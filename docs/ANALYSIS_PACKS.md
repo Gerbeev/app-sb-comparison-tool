@@ -43,7 +43,13 @@ indexes/node-index.json
 indexes/adjacency.json
 reports/top-connected.md
 reports/orphans.md
-graphs/dependencies-only.mmd
+graphs/README.md
+canonical-graph.json
+graph.html
+graph-data.js
+cytoscape.min.js
+cytoscape.LICENSE
+containers.json
 ```
 
 ## Comparison pack
@@ -56,9 +62,20 @@ compare/report.md
 compare/comparison.json
 compare/metrics.json
 compare/edge-diff.csv
+compare/command-diff.csv
+compare/compare-graph.html
+compare/compare-graph-data.js
+compare/cytoscape.min.js
+compare/cytoscape.LICENSE
 compare/critical-diff.json
 compare/diff-index.json
 compare/remediation-plan.md
 ```
 
-Use `remediation-plan.md` as a checklist for fixing migration gaps.
+Use `remediation-plan.md` as a checklist for fixing migration gaps. Use `compare/compare-graph.html` as the offline visual overlay for matched, missing, critical, command-difference, and condition-difference statuses.
+
+## Graph visualization
+
+Mermaid `.mmd` graph exports are obsolete and disabled by default. For large repositories, use source-pack `graph.html` for the offline interactive HTML graph powered by bundled Cytoscape.js, comparison-pack `compare/compare-graph.html` for visual migration status overlay, and `canonical-graph.json`, `containers.json`, `objects.csv`, and `edges.csv` for deterministic review and diff tools. The HTML reports include a bundled `cytoscape.min.js` runtime, relation filters, status filters, quick `Problems` / `Critical` / `Missing` buttons, visible graph counters, and side-panel status counts so large graphs can be narrowed before expanding all workflow/box groups.
+
+The HTML side panel also includes copyable node IDs, graph IDs, edge keys, relation evidence, source/target navigation, and URL-hash deep links for selected nodes/edges.

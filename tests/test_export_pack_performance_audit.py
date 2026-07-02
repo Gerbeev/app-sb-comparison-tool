@@ -89,7 +89,7 @@ def test_create_analysis_pack_reuses_single_traversal_cache_for_pack_outputs(tmp
 
     assert calls == 1
     assert (tmp_path / "indexes" / "node-index.json").exists()
-    assert (tmp_path / "graphs" / "full.mmd").exists()
+    assert (tmp_path / "graphs" / "README.md").exists()
     assert (tmp_path / "reports" / "relation-summary.csv").exists()
 
 
@@ -104,8 +104,9 @@ def test_pack_graph_views_reuse_supplied_traversal_cache(tmp_path: Path, monkeyp
 
     write_graph_views(graph, tmp_path, traversal=traversal)
 
-    assert (tmp_path / "full.mmd").exists()
-    assert (tmp_path / "dependencies-only.mmd").exists()
+    assert (tmp_path / "README.md").exists()
+    assert not (tmp_path / "full.mmd").exists()
+    assert not (tmp_path / "dependencies-only.mmd").exists()
 
 
 def test_export_csv_rows_accepts_streaming_iterables(tmp_path: Path) -> None:

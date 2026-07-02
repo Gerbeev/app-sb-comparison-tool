@@ -41,7 +41,7 @@ def test_analysis_pack_workflow(tmp_path: Path) -> None:
         sb_pack / "graph.json",
         sb_pack / "indexes" / "node-index.json",
         sb_pack / "indexes" / "adjacency.json",
-        sb_pack / "graphs" / "dependencies-only.mmd",
+        sb_pack / "graphs" / "README.md",
         sb_pack / "reports" / "top-connected.md",
         jil_pack / "pack-manifest.json",
         jil_pack / "graph.json",

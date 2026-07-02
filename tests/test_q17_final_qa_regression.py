@@ -56,7 +56,6 @@ def test_q17_comparison_file_contract_is_complete_unique_and_existing(tmp_path: 
     assert all(path.exists() for path in result.files)
     assert output / "compare" / "command-diff.csv" in result.files
     assert output / "compare" / "remediation-summary.json" in result.files
-    assert output / "compare" / "overlay-graph.mmd" in result.files
     assert output / "compare" / "metrics.csv" in result.files
     assert output / "compare" / "collisions.csv" in result.files
     assert output / "compare" / "mapping-diagnostics.csv" in result.files

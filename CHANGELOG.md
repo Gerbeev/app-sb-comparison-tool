@@ -1,54 +1,66 @@
 # Changelog
 
-### S1 (semantic matching correctness)
+### Unreleased
 
-- Added structural parsing of Stonebranch workflow `workflowVertices`/`workflowEdges` (`parsers/stonebranch_workflow.py`): vertices become `contains` edges, workflow edges become `depends_on_success`/`depends_on_failure`/`depends_on_done` dependencies (dependent -> prerequisite, matching AutoSys condition direction). Previously edge endpoints (`sourceId.taskName`/`targetId.taskName`) were misread as containment references and the dependencies themselves were lost, inflating both Stonebranch-extra edges and "missing dependency" findings.
-- Restricted Stonebranch variable-token extraction (`${...}`, `%...%`, `{{...}}`, `@(...)`) to command-like fields (command/script/parameters/args), matching the JIL parser which extracts variables from the command attribute only. Tokens in descriptions, log paths, and layout data no longer create synthetic variable nodes and `uses_variable` edges.
-- Task-typed Stonebranch references (trigger `taskName`, workflow vertices/edges, predecessor/successor) now resolve to an existing workflow node when no task with that name exists (and vice versa), mirroring the JIL parser's task/box/file_watcher resolution. This removes synthetic duplicate nodes and false key mismatches.
-- Unified `agent_cluster`/`agent` kinds and `runs_on_cluster`/`runs_on` relations for comparison keys (like `workflow`/`box`): AutoSys machines migrated to agent clusters with the same name now match.
-- Added relaxed dependency matching: a generic `depends_on` on one side now matches a specific `depends_on_*` between the same objects on the other side, reported in `edges.matched_relaxed` with a `relaxed_dependency_matches` summary counter and an explicit verification risk instead of two false "missing dependency" rows. Success-vs-failure conflicts remain mismatches.
-- Stonebranch-only object kinds (trigger, credential, connection, script, email_template) and relations (starts, uses_credential, uses_connection, uses_email_template, runs_script, references) are now reported in informational `stonebranch_only` buckets and no longer counted as `missing_in_jil` mismatches or readiness penalties. Match rates use comparable totals.
-- Edges that normalize to the same comparison key on one side (duplicate evidence such as `tasks` list + `workflowVertices` + task `workflowName`) now keep a deterministic representative for matching instead of being dropped as collisions, removing false "missing dependency" findings; the collision diagnostics remain.
-- Fixed latent `NameError`s in `compare_keys.py` (missing `re` and `KIND_OBJECT` imports) that crashed comparison when `name_rewrites` mapping rules or non-standard canonical keys were used.
-- Moved diff-set computation into `compare_matching.py`; extended `report.md`, `comparison.json`, and `diff-index.json` with relaxed-match and Stonebranch-only sections.
+- Replaced the temporary SVG-style HTML graph renderer with a real bundled Cytoscape.js runtime (`cytoscape.min.js`) for `graph.html` and `compare/compare-graph.html`.
+- Source and comparison graph exports now include the local Cytoscape.js runtime and license files, preserving offline use without CDN dependencies.
 
-### R1
+### QA20.9
 
-- Split AutoSys parser responsibilities into focused helper modules for parsed job records, JIL lexing, condition parsing, and JIL node construction while keeping `stonebranch_graph.parsers.autosys_jil.AutosysJilParser` as the public entry point.
-- Split Stonebranch parser responsibilities into focused helper modules for JSON discovery/object metadata, relation/reference normalization, and registry/synthetic reference resolution while keeping `stonebranch_graph.parsers.stonebranch_json.StonebranchJsonParser` as the public entry point.
-- Added regression coverage to ensure parser entrypoint files stay smaller facades and helper modules do not grow back into parser monoliths.
+- Improved HTML graph side-panel usability with copyable node IDs, graph IDs, edge keys, and graph edge IDs.
+- Added edge evidence details to the side panel, including relation, native relation, confidence, evidence file/path/key/value, and source/target navigation.
+- Added hash deep links for selected nodes and edges so a user can reopen or share a focused graph view.
 
-### R4
+### QA20.8
 
-- Converted triage fix guidance from an inline `if`/dictionary block into rule-driven tables: `TRIAGE_FIX_RULES`, `DEFAULT_FIX_GUIDANCE`, `TRIAGE_CATEGORY_ORDER`, and `TRIAGE_REVIEW_ORDER`.
-- Kept existing triage CSV/Markdown output behavior while making future finding categories easier to add after real dry runs.
-- Added regression coverage for rule-table guidance, explicit guidance preservation, review ordering, and the compact `fix_guidance_for()` lookup.
+- Improved large-scale HTML graph usability for source and comparison reports.
+- Added status filters and quick buttons for `Problems`, `Critical`, `Missing`, and `Show all` in `graph.html` / `compare-graph.html`.
+- Added visible-node/visible-edge counters and status-count sections in the side panel so large comparison graphs can be narrowed before expanding all groups.
 
-### R2
+### QA20.7
 
-- Split the monolithic comparison module into focused modules: `comparison_model.py`, `compare_engine.py`, `compare_keys.py`, `compare_payloads.py`, `compare_diagnostics.py`, `compare_export.py`, `compare_report.py`, `compare_csv_exports.py`, `compare_indexes.py`, `compare_remediation.py`, and `compare_overlay.py`.
-- Kept `stonebranch_graph.compare` as a compatibility facade so existing imports such as `compare_graphs`, `export_comparison`, `normalize_key`, and `comparison_edge_key` continue to work.
-- Added regression coverage for the split comparison architecture and facade exports.
+- Added offline comparison HTML graph report: `compare/compare-graph.html` and `compare/compare-graph-data.js`.
+- The comparison graph highlights matched objects, missing-in-Stonebranch/JIL objects, critical edge gaps, command syntax-only differences, semantic command mismatches, and condition mismatches.
 
-### R3
 
-- Centralized generated artifact file contracts in `stonebranch_graph/artifacts.py`.
-- Updated workflow file helpers, analysis-pack manifests, comparison-pack manifests, and triage outputs to use the shared artifact contract source.
-- Added regression coverage to prevent duplicate or divergent generated-file lists.
+### QA20.6
 
-### QA21
+- Removed CDN dependencies from `graph.html`; the source graph report now opens offline using bundled Cytoscape.js and local `graph-data.js`.
+- Kept the same workflow/box group model, relation filters, search, expand/collapse, fit, and side-panel navigation without requiring internet access.
 
-- Added a final QA baseline handoff document: `docs/QA_BASELINE.md`.
-- Added `stonebranch-graph --version` support through `python -m stonebranch_graph.cli --version`.
-- Synchronized README comparison output contracts with the current generated artifacts, including `remediation-summary.json`, `overlay-graph.mmd`, and separate triage outputs.
-- Documented baseline checks, real dry-run commands, source/comparison/triage output contracts, review order, archive cleanliness, and deferred items before real-repository testing.
 
-### QA20
+### QA20.5
 
-- Added post-dry-run fix guidance to triage findings: `suggested_fix_type`, `owner`, and `next_action`.
-- Added `triage-fix-plan.md` and `triage-fix-plan.csv` to turn dry-run findings into a prioritized follow-up backlog.
-- Grouped findings into actionable fix categories such as `manual_mapping_or_naming_rule`, `relation_parser_or_real_gap_triage`, `command_normalization_rule_candidate`, `real_command_migration_gap`, and `parser_rule_candidate`.
-- Updated the real-repository dry-run checklist and README to include the fix-plan outputs and review flow.
+- Added source pack `graph.html` and `graph-data.js` as the first offline HTML graph report baseline.
+- The offline HTML graph view uses workflow/box groups, task/job child nodes, relation category filters, search, expand/collapse, and side-panel navigation.
+- Added deterministic graph-data export for the HTML report while keeping `graph.json` and `canonical-graph.json` as the authoritative machine/diff artifacts.
+
+### QA20.4
+
+- Marked Mermaid `.mmd` graph exports as obsolete and disabled them by default for source and comparison outputs.
+- Source packs now write `graphs/README.md` instead of default Mermaid view files, while legacy Mermaid helper functions remain available for optional/debug use.
+- Removed default `dependency-graph.mmd`, `graphs/*.mmd`, and `compare/overlay-graph.mmd` from workflow output contracts and pack manifests.
+- Kept deterministic JSON/CSV graph artifacts as supported review paths while preparing for the offline HTML graph report replacement.
+
+### QA20.3
+
+- Added `canonical-graph.json` to source analysis packs as a deterministic, diff-friendly graph projection.
+- Canonical exports sort nodes, edges, containers, warnings, and metadata keys, use comparison-oriented keys, and avoid timestamp noise.
+- Preserved `graph.json` as the source-of-truth payload while adding canonical views for regular diff tools.
+- Updated pack manifests, workflow file lists, README output documentation, and regression tests for canonical sorted JSON exports.
+
+### QA20.2
+
+- Enforced Stonebranch dependency definitions as edges, not graph nodes. Files under `dependencies/`, `dependency/`, `predecessors/`, or `successors/` are parsed into task-to-task dependency edges when a dependent/prerequisite pair is available.
+- Preserved dependency source file/name/type as edge evidence via `native_relation`, `evidence_file`, `evidence_key`, and `evidence_value` instead of creating separate dependency nodes.
+- Added regression tests for dependency definition files, synthetic task placeholders, dependency arrays, `edges.csv`, and `graph.json` node kinds.
+
+### QA20.1
+
+- Added explicit workflow/box container exports: `containers.json` and `containers.csv`.
+- Stonebranch workflows and AutoSys boxes are represented as group/container records with contained tasks/jobs and nested containers.
+- Container exports use box-like `group_key` values so Stonebranch workflow groups can be compared with AutoSys box groups while preserving original node kinds in `graph.json`.
+- Added regression coverage for Stonebranch workflow task grouping, task-level `workflowName` membership, pack manifests, and generated container files.
 
 ### QA19
 
@@ -67,7 +79,7 @@
 ### QA17
 
 - Added a final QA regression pass for comparison artifact contracts, pack manifest important files, Windows launcher compatibility, and baseline archive cleanliness.
-- Fixed `comparison_files()` to remove the duplicate `compare/command-diff.csv` entry and list the full generated comparison artifact set, including `metrics.csv`, `collisions.csv`, `mapping-diagnostics.csv`, `remediation-summary.json`, and `overlay-graph.mmd`.
+- Fixed `comparison_files()` to remove the duplicate `compare/command-diff.csv` entry and list the full generated comparison artifact set, including `metrics.csv`, `collisions.csv`, `mapping-diagnostics.csv`, and `remediation-summary.json`.
 - Updated comparison pack manifests so `important_files` stays aligned with the current comparison output contract.
 
 ### QA16
@@ -237,4 +249,3 @@
 - Added Stonebranch/JIL graph build and comparison outputs.
 - Added analysis pack reports, metrics, Mermaid/DOT views, and CSV/JSON artifacts.
 - Removed obsolete legacy launchers/docs.
-

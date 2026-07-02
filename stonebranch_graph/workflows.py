@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .artifacts import analysis_pack_files, comparison_files, comparison_pack_files, graph_bundle_files, schema_profile_files
 from .compare import Comparison, compare_graphs, export_comparison
 from .config import AnalyzerConfig, MappingConfig
 from .core import Graph
@@ -42,6 +41,75 @@ class ProfileWorkflowResult:
     summary: dict[str, Any]
     files: list[Path]
 
+
+def graph_bundle_files(output_dir: Path) -> list[Path]:
+    return [
+        output_dir / "report.md",
+        output_dir / "graph.json",
+        output_dir / "canonical-graph.json",
+        output_dir / "graph.html",
+        output_dir / "graph-data.js",
+        output_dir / "cytoscape.min.js",
+        output_dir / "cytoscape.LICENSE",
+        output_dir / "containers.json",
+        output_dir / "containers.csv",
+        output_dir / "metrics.json",
+        output_dir / "objects.csv",
+        output_dir / "edges.csv",
+        output_dir / "dependency-graph.dot",
+    ]
+
+
+def analysis_pack_files(output_dir: Path) -> list[Path]:
+    return [
+        output_dir / "README.md",
+        output_dir / "pack-manifest.json",
+        output_dir / "report.md",
+        output_dir / "graph.json",
+        output_dir / "canonical-graph.json",
+        output_dir / "graph.html",
+        output_dir / "graph-data.js",
+        output_dir / "cytoscape.min.js",
+        output_dir / "cytoscape.LICENSE",
+        output_dir / "containers.json",
+        output_dir / "containers.csv",
+        output_dir / "metrics.json",
+        output_dir / "indexes" / "node-index.json",
+        output_dir / "graphs" / "README.md",
+        output_dir / "reports" / "top-connected.md",
+    ]
+
+
+def comparison_files(output_dir: Path) -> list[Path]:
+    compare_dir = output_dir / "compare"
+    return [
+        compare_dir / "report.md",
+        compare_dir / "comparison.json",
+        compare_dir / "metrics.json",
+        compare_dir / "metrics.csv",
+        compare_dir / "edge-diff.csv",
+        compare_dir / "command-diff.csv",
+        compare_dir / "compare-graph.html",
+        compare_dir / "compare-graph-data.js",
+        compare_dir / "cytoscape.min.js",
+        compare_dir / "cytoscape.LICENSE",
+        compare_dir / "missing-in-stonebranch.csv",
+        compare_dir / "missing-in-jil.csv",
+        compare_dir / "collisions.csv",
+        compare_dir / "mapping-diagnostics.csv",
+        compare_dir / "diff-index.json",
+        compare_dir / "critical-diff.json",
+        compare_dir / "remediation-summary.json",
+        compare_dir / "remediation-plan.md",
+    ]
+
+
+def comparison_pack_files(output_dir: Path) -> list[Path]:
+    return [output_dir / "compare-pack-manifest.json", *comparison_files(output_dir)]
+
+
+def schema_profile_files(output_dir: Path) -> list[Path]:
+    return [output_dir / "schema-profile.md", output_dir / "schema-profile.csv"]
 
 
 def graph_summary(graph: Graph) -> dict[str, Any]:

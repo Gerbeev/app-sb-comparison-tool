@@ -77,7 +77,8 @@ def test_export_report_mentions_capped_graph_views(tmp_path: Path) -> None:
     export_graph_bundle(graph, tmp_path, max_graph_edges=2)
 
     report = (tmp_path / "report.md").read_text(encoding="utf-8")
-    assert "Generated graph views" in report
+    assert "Graph views" in report
+    assert "Mermaid `.mmd` graph exports are obsolete and disabled by default" in report
     assert "capped at **2** of **4** edges" in report
     assert "graph.json" in report
     assert "edges.csv" in report

@@ -4,7 +4,6 @@ import argparse
 from pathlib import Path
 import sys
 
-from . import __version__
 from .config import AnalyzerConfig
 from .logging_utils import log_error
 from .tui import run_tui
@@ -35,7 +34,6 @@ def build_parser() -> argparse.ArgumentParser:
         description="Build and compare dependency graphs from Stonebranch JSON exports and AutoSys JIL files.",
     )
     parser.add_argument("--config", type=Path, default=None, help="Optional analyzer config JSON.")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     add_build_stonebranch_parser(subparsers)

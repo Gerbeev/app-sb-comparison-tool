@@ -27,7 +27,7 @@ def test_cli_main_is_a_thin_parser_and_dispatch_wrapper() -> None:
 
 
 def test_compare_graphs_is_split_into_index_payload_and_summary_helpers() -> None:
-    assert function_length("stonebranch_graph/compare_engine.py", "compare_graphs") <= 35
+    assert function_length("stonebranch_graph/compare.py", "compare_graphs") <= 35
     assert {
         "build_side_indexes",
         "compare_matched_attributes",
@@ -35,11 +35,7 @@ def test_compare_graphs_is_split_into_index_payload_and_summary_helpers() -> Non
         "build_edge_diff_payloads",
         "build_diagnostics",
         "build_summary",
-    } <= function_names("stonebranch_graph/compare_engine.py")
-
-
-def test_compare_module_is_a_compatibility_facade_after_r2_split() -> None:
-    assert function_names("stonebranch_graph/compare.py") == set()
+    } <= function_names("stonebranch_graph/compare.py")
 
 
 def test_export_report_is_split_into_report_section_helpers() -> None:

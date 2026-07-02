@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .artifacts import ANALYSIS_PACK_FILE_NAMES, COMPARISON_FILE_NAMES
 from .compare import compare_graphs, export_comparison
 from .config import AnalyzerConfig, MappingConfig
 from .core import Graph
@@ -88,7 +87,24 @@ def write_pack_manifest(
             "nodes": len(graph.nodes),
             "edges": len(graph.edges),
         },
-        "important_files": list(ANALYSIS_PACK_FILE_NAMES),
+        "important_files": [
+            "README.md",
+            "report.md",
+            "graph.json",
+            "canonical-graph.json",
+            "graph.html",
+            "graph-data.js",
+            "cytoscape.min.js",
+            "cytoscape.LICENSE",
+            "containers.json",
+            "containers.csv",
+            "metrics.json",
+            "indexes/node-index.json",
+            "indexes/adjacency.json",
+            "graphs/README.md",
+            "reports/top-connected.md",
+            "reports/orphans.md",
+        ],
     }
     write_json(output_dir / "pack-manifest.json", manifest)
 
@@ -147,8 +163,31 @@ def write_indexes(graph: Graph, index_dir: Path, *, traversal: GraphTraversalCac
     write_json(index_dir / "reverse-adjacency.json", dict(sorted(reverse_adjacency.items())))
 
 
-def write_graph_views(graph: Graph, graph_dir: Path, *, traversal: GraphTraversalCache | None = None) -> None:
+def write_graph_views(
+    graph: Graph,
+    graph_dir: Path,
+    *,
+    traversal: GraphTraversalCache | None = None,
+    include_legacy_mermaid: bool = False,
+) -> None:
     graph_dir.mkdir(parents=True, exist_ok=True)
+    traversal = traversal or GraphTraversalCache.build(graph)
+    write_legacy_graph_readme(graph_dir)
+    if not include_legacy_mermaid:
+        return
+    write_legacy_mermaid_views(graph, graph_dir, traversal=traversal)
+
+
+def write_legacy_graph_readme(graph_dir: Path) -> None:
+    write_text_file(
+        graph_dir / "README.md",
+        "# Graph views\n\n"
+        "Mermaid `.mmd` graph exports are obsolete and disabled by default because large production repositories are hard to render and navigate in Mermaid.\n\n"
+        "Use the pack-level `graph.html` offline Cytoscape HTML graph report for interactive visual navigation. Use `canonical-graph.json`, `containers.json`, `objects.csv`, and `edges.csv` for deterministic graph review and diff tools.\n",
+    )
+
+
+def write_legacy_mermaid_views(graph: Graph, graph_dir: Path, *, traversal: GraphTraversalCache | None = None) -> None:
     traversal = traversal or GraphTraversalCache.build(graph)
     write_mermaid(graph, graph_dir / "full.mmd", traversal=traversal)
     write_mermaid(graph, graph_dir / "tasks-only.mmd", node_kinds={KIND_TASK, KIND_BOX, KIND_WORKFLOW}, traversal=traversal)
@@ -270,18 +309,25 @@ This folder is a self-contained analysis pack for `{graph.source_system}`.
 ## Start here
 
 1. `report.md` - human-readable summary.
-2. `graph.json` - full machine-readable graph.
-3. `metrics.json` - graph metrics.
-4. `indexes/node-index.json` - lookup by id, name, kind, canonical key.
-5. `indexes/adjacency.json` - outgoing dependency index.
-6. `indexes/reverse-adjacency.json` - incoming dependency index.
-7. `graphs/*.mmd` - Mermaid graph views.
-8. `reports/top-connected.md` - most connected objects.
-9. `reports/orphans.md` - isolated objects.
+2. `graph.json` - full machine-readable source-of-truth graph.
+3. `canonical-graph.json` - deterministic diff-friendly graph projection.
+4. `containers.json` - workflow/box group view with contained tasks/jobs.
+5. `containers.csv` - tabular workflow/box group membership for Excel/diff checks.
+6. `metrics.json` - graph metrics.
+7. `indexes/node-index.json` - lookup by id, name, kind, canonical key.
+8. `indexes/adjacency.json` - outgoing dependency index.
+9. `indexes/reverse-adjacency.json` - incoming dependency index.
+10. `graph.html` - offline interactive source graph report powered by bundled Cytoscape.js.
+11. `graph-data.js` - deterministic data payload used by `graph.html`.
+12. `cytoscape.min.js` - local Cytoscape.js runtime used by the HTML graph.
+13. `cytoscape.LICENSE` - Cytoscape.js MIT license.
+14. `graphs/README.md` - notes that legacy Mermaid graph views are obsolete and disabled by default.
+15. `reports/top-connected.md` - most connected objects.
+16. `reports/orphans.md` - isolated objects.
 
 ## Important note
 
-`graph.json` is the source of truth. Indexes and graph views are generated from it and can be regenerated.
+`graph.json` is the source of truth. `canonical-graph.json` is sorted and stable for diff tools. `containers.json` is the container/group projection used to review workflow/box membership. `graph.html` is the offline interactive Cytoscape HTML graph report generated from `graph-data.js` and the bundled `cytoscape.min.js` runtime. Indexes and graph views are generated from the graph and can be regenerated.
 """
     write_text_file(output_dir / "README.md", text)
 
@@ -323,6 +369,25 @@ def write_compare_pack_manifest(output_dir: Path, stonebranch_pack: Path, jil_pa
         "stonebranch_pack": str(stonebranch_pack),
         "jil_pack": str(jil_pack),
         "summary": summary,
-        "important_files": list(COMPARISON_FILE_NAMES),
+        "important_files": [
+            "compare/report.md",
+            "compare/comparison.json",
+            "compare/metrics.json",
+            "compare/metrics.csv",
+            "compare/edge-diff.csv",
+            "compare/command-diff.csv",
+            "compare/compare-graph.html",
+            "compare/compare-graph-data.js",
+            "compare/cytoscape.min.js",
+            "compare/cytoscape.LICENSE",
+            "compare/missing-in-stonebranch.csv",
+            "compare/missing-in-jil.csv",
+            "compare/collisions.csv",
+            "compare/mapping-diagnostics.csv",
+            "compare/diff-index.json",
+            "compare/critical-diff.json",
+            "compare/remediation-summary.json",
+            "compare/remediation-plan.md",
+        ],
     }
     write_json(output_dir / "compare-pack-manifest.json", manifest)

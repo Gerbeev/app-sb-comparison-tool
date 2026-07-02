@@ -6,8 +6,16 @@ from pathlib import Path
 from collections.abc import Iterable
 from typing import Any
 
-from .core import Graph
+from .core import Edge, Graph, Node
 from .graph_utils import GraphTraversalCache
+from .domain import (
+    KIND_BOX,
+    KIND_TASK,
+    KIND_WORKFLOW,
+    REL_CONTAINS,
+    REL_DEPENDS_ON_SUCCESS,
+    REL_SUCCESSOR_OF,
+)
 from .metrics import GraphMetrics, compute_graph_metrics, metric_rows, metrics_to_dict
 from .rendering import escape_dot, escape_mmd, mmd_id
 
@@ -41,6 +49,19 @@ EDGE_CSV_FIELDS = [
 
 METRICS_CSV_FIELDS = ["metric", "value"]
 
+CONTAINER_CSV_FIELDS = [
+    "container_key",
+    "container_kind",
+    "container_name",
+    "child_count",
+    "task_count",
+    "nested_container_count",
+    "child_keys",
+    "source_file",
+]
+
+CONTAINER_KINDS = {KIND_WORKFLOW, KIND_BOX}
+
 
 def export_graph_bundle(
     graph: Graph,
@@ -48,14 +69,21 @@ def export_graph_bundle(
     *,
     max_graph_edges: int | None = TOP_LEVEL_GRAPH_MAX_EDGES,
     traversal: GraphTraversalCache | None = None,
+    include_legacy_mermaid: bool = False,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     traversal = traversal or GraphTraversalCache.build(graph)
     graph_metrics = compute_graph_metrics(graph, traversal=traversal)
     write_json(output_dir / "graph.json", graph.to_dict())
+    export_canonical_graph_json(graph, output_dir / "canonical-graph.json", traversal=traversal)
+    from .html_graph import export_cytoscape_html_report
+    export_cytoscape_html_report(graph, output_dir, traversal=traversal)
+    export_containers_json(graph, output_dir / "containers.json", traversal=traversal)
+    export_containers_csv(graph, output_dir / "containers.csv", traversal=traversal)
     export_nodes_csv(graph, output_dir / "objects.csv", traversal=traversal)
     export_edges_csv(graph, output_dir / "edges.csv", traversal=traversal)
-    export_mermaid(graph, output_dir / "dependency-graph.mmd", max_edges=max_graph_edges, traversal=traversal)
+    if include_legacy_mermaid:
+        export_mermaid(graph, output_dir / "dependency-graph.mmd", max_edges=max_graph_edges, traversal=traversal)
     export_dot(graph, output_dir / "dependency-graph.dot", max_edges=max_graph_edges, traversal=traversal)
     metrics_payload = metrics_to_dict(graph_metrics)
     write_json(output_dir / "metrics.json", metrics_payload)
@@ -80,6 +108,286 @@ def write_json(path: Path, payload: Any) -> None:
 
 def load_graph_json(path: Path) -> Graph:
     return Graph.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+
+
+def write_canonical_json(path: Path, payload: Any) -> None:
+    """Write JSON in a deterministic form intended for diff tools."""
+
+    write_text_file(path, json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def canonical_kind(kind: str) -> str:
+    """Return the kind used in canonical diff/export views.
+
+    Stonebranch workflows and AutoSys boxes are the same logical container layer
+    for migration review, but the original kind is still preserved separately.
+    """
+
+    if kind == KIND_WORKFLOW:
+        return KIND_BOX
+    return kind
+
+
+def canonical_node_key(node: Node) -> str:
+    if node.kind in CONTAINER_KINDS:
+        return container_group_key(node.canonical_key, node.kind)
+    return node.canonical_key
+
+
+def stable_value(value: Any) -> Any:
+    """Return a recursively sorted JSON-compatible value."""
+
+    if isinstance(value, dict):
+        return {str(key): stable_value(value[key]) for key in sorted(value, key=str)}
+    if isinstance(value, list):
+        return [stable_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [stable_value(item) for item in value]
+    if isinstance(value, set):
+        return sorted(stable_value(item) for item in value)
+    return value
+
+
+def canonical_edge_components(edge: Edge, graph: Graph) -> tuple[Node, str, Node] | None:
+    """Return source/relation/target normalized for diff-friendly exports."""
+
+    source = graph.nodes.get(edge.source)
+    target = graph.nodes.get(edge.target)
+    if not source or not target:
+        return None
+
+    relation = edge.relation
+    if relation == REL_SUCCESSOR_OF:
+        return target, REL_DEPENDS_ON_SUCCESS, source
+
+    if relation == REL_CONTAINS and source.kind not in CONTAINER_KINDS and target.kind in CONTAINER_KINDS:
+        return target, relation, source
+
+    return source, relation, target
+
+
+def build_canonical_graph_view(graph: Graph, *, traversal: GraphTraversalCache | None = None) -> dict[str, Any]:
+    """Build a deterministic, diff-friendly graph projection.
+
+    `graph.json` remains the complete source-of-truth payload. This view is
+    designed for comparing Stonebranch and AutoSys exports in a regular diff
+    tool, so it uses comparison-oriented keys, stable sorting, and no timestamps.
+    """
+
+    traversal = traversal or GraphTraversalCache.build(graph)
+    container_view = build_container_view(graph, traversal=traversal)
+
+    nodes: list[dict[str, Any]] = []
+    for node in traversal.sorted_nodes:
+        nodes.append(
+            {
+                "key": canonical_node_key(node),
+                "kind": canonical_kind(node.kind),
+                "original_kind": node.kind,
+                "name": node.name,
+                "source_system": node.source_system,
+                "source_file": node.source_file,
+                "attributes_hash": node.attributes_hash,
+                "synthetic": bool(node.metadata.get("synthetic")),
+                "metadata": stable_value(node.metadata),
+            }
+        )
+
+    edges: list[dict[str, Any]] = []
+    broken_edges: list[dict[str, Any]] = []
+    for edge in traversal.sorted_edges:
+        components = canonical_edge_components(edge, graph)
+        if components is None:
+            broken_edges.append(
+                {
+                    "edge_id": edge.id,
+                    "source": edge.source,
+                    "relation": edge.relation,
+                    "target": edge.target,
+                    "native_relation": edge.native_relation,
+                    "evidence_file": edge.evidence_file,
+                }
+            )
+            continue
+        source, relation, target = components
+        edges.append(
+            {
+                "source": canonical_node_key(source),
+                "relation": relation,
+                "target": canonical_node_key(target),
+                "source_kind": canonical_kind(source.kind),
+                "target_kind": canonical_kind(target.kind),
+                "source_original_kind": source.kind,
+                "target_original_kind": target.kind,
+                "native_relation": edge.native_relation,
+                "evidence_file": edge.evidence_file,
+                "evidence_key": edge.evidence_key,
+                "confidence": edge.confidence,
+            }
+        )
+
+    nodes = sorted(nodes, key=lambda item: (item["key"], item["original_kind"], item["name"], item["source_file"]))
+    edges = sorted(
+        edges,
+        key=lambda item: (
+            item["source"],
+            item["relation"],
+            item["target"],
+            item["native_relation"],
+            item["evidence_file"],
+            item["evidence_key"],
+        ),
+    )
+    broken_edges = sorted(broken_edges, key=lambda item: (item["source"], item["relation"], item["target"], item["edge_id"]))
+
+    return {
+        "schema_version": "1.0",
+        "source_system": graph.source_system,
+        "env": graph.env,
+        "summary": {
+            "nodes": len(nodes),
+            "edges": len(edges),
+            "containers": len(container_view["containers"]),
+            "ungrouped_tasks": len(container_view["ungrouped_tasks"]),
+            "warnings": len(graph.warnings),
+        },
+        "containers": container_view["containers"],
+        "ungrouped_tasks": container_view["ungrouped_tasks"],
+        "nodes": nodes,
+        "edges": edges,
+        "broken_edges": broken_edges,
+        "warnings": sorted(str(warning) for warning in graph.warnings),
+    }
+
+
+def export_canonical_graph_json(graph: Graph, path: Path, *, traversal: GraphTraversalCache | None = None) -> None:
+    write_canonical_json(path, build_canonical_graph_view(graph, traversal=traversal))
+
+
+def container_group_key(canonical_key: str, kind: str) -> str:
+    """Return a container-comparison key for workflow/box-like groups.
+
+    Stonebranch workflows and AutoSys boxes represent the same logical container
+    layer. The raw graph preserves each native kind, while container-oriented
+    exports use a box-like key so diff tools can compare the group structure.
+    """
+
+    if kind not in CONTAINER_KINDS:
+        return canonical_key
+    env, _, name = canonical_key.partition(":")
+    if not name:
+        return canonical_key
+    _kind, _, real_name = name.partition(":")
+    if not real_name:
+        return canonical_key
+    return f"{env}:{KIND_BOX}:{real_name}"
+
+
+def build_container_view(graph: Graph, *, traversal: GraphTraversalCache | None = None) -> dict[str, Any]:
+    """Build a deterministic workflow/box -> children view of the graph.
+
+    This is the human/diff-friendly container model used before Cytoscape HTML:
+    workflows/boxes are groups, tasks/jobs and nested workflows/boxes are
+    children, and dependencies remain edges outside this container view.
+    """
+
+    traversal = traversal or GraphTraversalCache.build(graph)
+    container_nodes = [node for node in traversal.sorted_nodes if node.kind in CONTAINER_KINDS]
+    container_ids = {node.id for node in container_nodes}
+    contained_child_ids: set[str] = set()
+    children_by_container: dict[str, list[dict[str, Any]]] = {node.id: [] for node in container_nodes}
+
+    for edge in traversal.sorted_edges:
+        if edge.relation != REL_CONTAINS or edge.source not in container_ids:
+            continue
+        child = graph.nodes.get(edge.target)
+        if not child:
+            continue
+        contained_child_ids.add(child.id)
+        children_by_container[edge.source].append(
+            {
+                "id": child.id,
+                "key": child.canonical_key,
+                "group_key": container_group_key(child.canonical_key, child.kind),
+                "kind": child.kind,
+                "name": child.name,
+                "source_file": child.source_file,
+                "edge_id": edge.id,
+                "synthetic": bool(child.metadata.get("synthetic")),
+            }
+        )
+
+    containers: list[dict[str, Any]] = []
+    for node in container_nodes:
+        children = sorted(children_by_container[node.id], key=lambda child: (child["group_key"], child["kind"], child["name"]))
+        task_count = sum(1 for child in children if child["kind"] == KIND_TASK)
+        nested_container_count = sum(1 for child in children if child["kind"] in CONTAINER_KINDS)
+        containers.append(
+            {
+                "id": node.id,
+                "key": node.canonical_key,
+                "group_key": container_group_key(node.canonical_key, node.kind),
+                "kind": node.kind,
+                "name": node.name,
+                "source_file": node.source_file,
+                "synthetic": bool(node.metadata.get("synthetic")),
+                "child_count": len(children),
+                "task_count": task_count,
+                "nested_container_count": nested_container_count,
+                "children": children,
+            }
+        )
+
+    ungrouped_tasks = [
+        {
+            "id": node.id,
+            "key": node.canonical_key,
+            "kind": node.kind,
+            "name": node.name,
+            "source_file": node.source_file,
+            "synthetic": bool(node.metadata.get("synthetic")),
+        }
+        for node in traversal.sorted_nodes
+        if node.kind == KIND_TASK and node.id not in contained_child_ids
+    ]
+
+    return {
+        "schema_version": "1.0",
+        "source_system": graph.source_system,
+        "env": graph.env,
+        "summary": {
+            "containers": len(containers),
+            "contained_children": sum(container["child_count"] for container in containers),
+            "ungrouped_tasks": len(ungrouped_tasks),
+        },
+        "containers": sorted(containers, key=lambda container: (container["group_key"], container["kind"], container["name"])),
+        "ungrouped_tasks": sorted(ungrouped_tasks, key=lambda task: (task["key"], task["name"])),
+    }
+
+
+def export_containers_json(graph: Graph, path: Path, *, traversal: GraphTraversalCache | None = None) -> None:
+    write_json(path, build_container_view(graph, traversal=traversal))
+
+
+def export_containers_csv(graph: Graph, path: Path, *, traversal: GraphTraversalCache | None = None) -> None:
+    view = build_container_view(graph, traversal=traversal)
+    rows = []
+    for container in view["containers"]:
+        rows.append(
+            {
+                "container_key": container["group_key"],
+                "container_kind": container["kind"],
+                "container_name": container["name"],
+                "child_count": container["child_count"],
+                "task_count": container["task_count"],
+                "nested_container_count": container["nested_container_count"],
+                "child_keys": ";".join(child["group_key"] for child in container["children"]),
+                "source_file": container["source_file"],
+            }
+        )
+    export_csv_rows(path, CONTAINER_CSV_FIELDS, rows)
 
 
 def export_nodes_csv(graph: Graph, path: Path, *, traversal: GraphTraversalCache | None = None) -> None:
@@ -243,19 +551,20 @@ def append_quality_metrics(lines: list[str], graph_metrics: GraphMetrics) -> Non
 
 
 def append_capped_graph_note(lines: list[str], graph: Graph, graph_view_max_edges: int | None) -> None:
-    if graph_view_max_edges is None or len(graph.edges) <= graph_view_max_edges:
-        return
     lines.extend(
         [
             "",
-            "## Generated graph views",
+            "## Graph views",
             "",
-            (
-                f"- `dependency-graph.mmd` and `dependency-graph.dot` are capped at "
-                f"**{graph_view_max_edges}** of **{len(graph.edges)}** edges. "
-                "Use `graph.json` or `edges.csv` for the full dependency graph."
-            ),
+            "- Mermaid `.mmd` graph exports are obsolete and disabled by default for large repositories.",
+            "- Use `graph.html` for the offline Cytoscape HTML graph report. Use `canonical-graph.json`, `containers.json`, `objects.csv`, and `edges.csv` for deterministic graph review.",
         ]
+    )
+    if graph_view_max_edges is None or len(graph.edges) <= graph_view_max_edges:
+        return
+    lines.append(
+        f"- `dependency-graph.dot` is capped at **{graph_view_max_edges}** of **{len(graph.edges)}** edges. "
+        "Use `graph.json` or `edges.csv` for the full dependency graph."
     )
 
 

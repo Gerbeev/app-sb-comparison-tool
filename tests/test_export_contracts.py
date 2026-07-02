@@ -68,9 +68,9 @@ def test_capped_graph_views_do_not_truncate_machine_readable_sources(tmp_path: P
     with (tmp_path / "edges.csv").open(newline="", encoding="utf-8") as f:
         assert len(list(csv.DictReader(f))) == 5
 
-    mermaid = (tmp_path / "dependency-graph.mmd").read_text(encoding="utf-8")
+    assert not (tmp_path / "dependency-graph.mmd").exists()
     dot = (tmp_path / "dependency-graph.dot").read_text(encoding="utf-8")
-    assert "Graph view capped at 2 of 5 edges" in mermaid
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "Mermaid `.mmd` graph exports are obsolete and disabled by default" in report
     assert "Graph view capped at 2 of 5 edges" in dot
-    assert mermaid.count(" -->|") == 2
     assert dot.count(" -> ") == 2

@@ -222,12 +222,10 @@ def compute_comparison_metrics(
 
 def compute_comparison_rate_metrics(summary: dict[str, int]) -> ComparisonRateMetrics:
     matched_nodes = summary.get("matched_nodes", 0)
-    # Relaxed dependency matches are real matches (same dependency, unspecified
-    # condition on one side), so they count toward edge coverage.
-    matched_edges = summary.get("matched_edges", 0) + summary.get("relaxed_dependency_matches", 0)
-    stonebranch_nodes = summary.get("stonebranch_comparable_nodes", summary.get("stonebranch_nodes", 0))
+    matched_edges = summary.get("matched_edges", 0)
+    stonebranch_nodes = summary.get("stonebranch_nodes", 0)
     jil_nodes = summary.get("jil_nodes", 0)
-    stonebranch_edges = summary.get("stonebranch_comparable_edges", summary.get("stonebranch_edges", 0))
+    stonebranch_edges = summary.get("stonebranch_edges", 0)
     jil_edges = summary.get("jil_edges", 0)
 
     return ComparisonRateMetrics(
