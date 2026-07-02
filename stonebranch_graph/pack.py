@@ -11,18 +11,6 @@ from .core import Graph
 from .exporters import export_csv_rows, export_graph_bundle, load_graph_json, write_json, write_text_file
 from .graph_utils import GraphTraversalCache
 from .logging_utils import log_comparison_risks, log_graph_warnings, log_info
-from .domain import (
-    CALENDAR_RELATIONS,
-    KIND_BOX,
-    KIND_TASK,
-    KIND_WORKFLOW,
-    REL_CONTAINS,
-    REL_DEPENDS_ON,
-    REL_STARTS,
-    REL_USES_VARIABLE,
-    RUNTIME_TARGET_RELATIONS,
-)
-from .rendering import escape_mmd, mmd_id
 
 
 def create_analysis_pack(
@@ -51,7 +39,7 @@ def create_analysis_pack(
         env_aware=env_aware,
     )
     write_indexes(graph, output_dir / "indexes", traversal=traversal)
-    write_graph_views(graph, output_dir / "graphs", traversal=traversal)
+    write_graph_views(output_dir / "graphs")
     write_detailed_reports(graph, output_dir / "reports", traversal=traversal)
     write_pack_readme(graph, output_dir, pack_type)
 
@@ -163,87 +151,14 @@ def write_indexes(graph: Graph, index_dir: Path, *, traversal: GraphTraversalCac
     write_json(index_dir / "reverse-adjacency.json", dict(sorted(reverse_adjacency.items())))
 
 
-def write_graph_views(
-    graph: Graph,
-    graph_dir: Path,
-    *,
-    traversal: GraphTraversalCache | None = None,
-    include_legacy_mermaid: bool = False,
-) -> None:
+def write_graph_views(graph_dir: Path) -> None:
     graph_dir.mkdir(parents=True, exist_ok=True)
-    traversal = traversal or GraphTraversalCache.build(graph)
-    write_legacy_graph_readme(graph_dir)
-    if not include_legacy_mermaid:
-        return
-    write_legacy_mermaid_views(graph, graph_dir, traversal=traversal)
-
-
-def write_legacy_graph_readme(graph_dir: Path) -> None:
     write_text_file(
         graph_dir / "README.md",
         "# Graph views\n\n"
-        "Mermaid `.mmd` graph exports are obsolete and disabled by default because large production repositories are hard to render and navigate in Mermaid.\n\n"
-        "Use the pack-level `graph.html` offline Cytoscape HTML graph report for interactive visual navigation. Use `canonical-graph.json`, `containers.json`, `objects.csv`, and `edges.csv` for deterministic graph review and diff tools.\n",
+        "Mermaid `.mmd` graph exports have been fully decommissioned.\n\n"
+        "Use the pack-level `graph.html` offline Cytoscape HTML graph report for interactive visual navigation. Use `canonical-graph.json`, `containers.json`, `objects.csv`, `edges.csv`, and `dependency-graph.dot` for deterministic graph review and diff tools.\n",
     )
-
-
-def write_legacy_mermaid_views(graph: Graph, graph_dir: Path, *, traversal: GraphTraversalCache | None = None) -> None:
-    traversal = traversal or GraphTraversalCache.build(graph)
-    write_mermaid(graph, graph_dir / "full.mmd", traversal=traversal)
-    write_mermaid(graph, graph_dir / "tasks-only.mmd", node_kinds={KIND_TASK, KIND_BOX, KIND_WORKFLOW}, traversal=traversal)
-    write_mermaid(graph, graph_dir / "triggers-to-tasks.mmd", relations={REL_STARTS}, traversal=traversal)
-    write_mermaid(graph, graph_dir / "dependencies-only.mmd", relation_prefixes=(REL_DEPENDS_ON,), relations={REL_CONTAINS}, traversal=traversal)
-    write_mermaid(graph, graph_dir / "runtime.mmd", relations=RUNTIME_TARGET_RELATIONS, traversal=traversal)
-    write_mermaid(graph, graph_dir / "calendars.mmd", relations=CALENDAR_RELATIONS, traversal=traversal)
-    write_mermaid(graph, graph_dir / "variables.mmd", relations={REL_USES_VARIABLE}, traversal=traversal)
-
-
-def write_mermaid(
-    graph: Graph,
-    path: Path,
-    *,
-    node_kinds: set[str] | None = None,
-    relations: set[str] | None = None,
-    relation_prefixes: tuple[str, ...] = (),
-    max_edges: int = 800,
-    traversal: GraphTraversalCache | None = None,
-) -> None:
-    traversal = traversal or GraphTraversalCache.build(graph)
-    selected_edges = []
-    for edge in traversal.sorted_edges:
-        if relations is not None and edge.relation not in relations:
-            if not any(edge.relation.startswith(prefix) for prefix in relation_prefixes):
-                continue
-        source = graph.nodes.get(edge.source)
-        target = graph.nodes.get(edge.target)
-        if not source or not target:
-            continue
-        if node_kinds is not None and source.kind not in node_kinds and target.kind not in node_kinds:
-            continue
-        selected_edges.append(edge)
-
-    capped = len(selected_edges) > max_edges
-    selected_edges = selected_edges[:max_edges]
-
-    node_ids = {edge.source for edge in selected_edges} | {edge.target for edge in selected_edges}
-    if not selected_edges and node_kinds:
-        node_ids = {node.id for node in traversal.sorted_nodes if node.kind in node_kinds}
-
-    lines = ["flowchart LR"]
-    if capped:
-        lines.append(f'  note["Graph capped at {max_edges} edges. Use graph.json/indexes for full analysis."]')
-
-    for node_id in sorted(node_ids):
-        node = graph.nodes.get(node_id)
-        if not node:
-            continue
-        label = f"{node.kind}: {node.name}"
-        lines.append(f'  {mmd_id(node.id)}["{escape_mmd(label)}"]')
-
-    for edge in selected_edges:
-        lines.append(f"  {mmd_id(edge.source)} -->|{escape_mmd(edge.relation)}| {mmd_id(edge.target)}")
-
-    write_text_file(path, "\n".join(lines) + "\n")
 
 
 def write_detailed_reports(graph: Graph, reports_dir: Path, *, traversal: GraphTraversalCache | None = None) -> None:
@@ -321,7 +236,7 @@ This folder is a self-contained analysis pack for `{graph.source_system}`.
 11. `graph-data.js` - deterministic data payload used by `graph.html`.
 12. `cytoscape.min.js` - local Cytoscape.js runtime used by the HTML graph.
 13. `cytoscape.LICENSE` - Cytoscape.js MIT license.
-14. `graphs/README.md` - notes that legacy Mermaid graph views are obsolete and disabled by default.
+14. `graphs/README.md` - notes that Mermaid graph views have been decommissioned.
 15. `reports/top-connected.md` - most connected objects.
 16. `reports/orphans.md` - isolated objects.
 

@@ -4,6 +4,7 @@
 
 - Replaced the temporary SVG-style HTML graph renderer with a real bundled Cytoscape.js runtime (`cytoscape.min.js`) for `graph.html` and `compare/compare-graph.html`.
 - Source and comparison graph exports now include the local Cytoscape.js runtime and license files, preserving offline use without CDN dependencies.
+- Fully decommissioned Mermaid `.mmd` generation hooks, including source graph exports, pack-level Mermaid views, and comparison overlay Mermaid output.
 
 ### QA20.9
 
@@ -38,7 +39,7 @@
 ### QA20.4
 
 - Marked Mermaid `.mmd` graph exports as obsolete and disabled them by default for source and comparison outputs.
-- Source packs now write `graphs/README.md` instead of default Mermaid view files, while legacy Mermaid helper functions remain available for optional/debug use.
+- Source packs now write `graphs/README.md` instead of default Mermaid view files.
 - Removed default `dependency-graph.mmd`, `graphs/*.mmd`, and `compare/overlay-graph.mmd` from workflow output contracts and pack manifests.
 - Kept deterministic JSON/CSV graph artifacts as supported review paths while preparing for the offline HTML graph report replacement.
 

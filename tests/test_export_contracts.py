@@ -71,6 +71,6 @@ def test_capped_graph_views_do_not_truncate_machine_readable_sources(tmp_path: P
     assert not (tmp_path / "dependency-graph.mmd").exists()
     dot = (tmp_path / "dependency-graph.dot").read_text(encoding="utf-8")
     report = (tmp_path / "report.md").read_text(encoding="utf-8")
-    assert "Mermaid `.mmd` graph exports are obsolete and disabled by default" in report
+    assert "Mermaid `.mmd` graph exports have been fully decommissioned" in report
     assert "Graph view capped at 2 of 5 edges" in dot
     assert dot.count(" -> ") == 2

@@ -17,7 +17,7 @@ from .domain import (
     REL_SUCCESSOR_OF,
 )
 from .metrics import GraphMetrics, compute_graph_metrics, metric_rows, metrics_to_dict
-from .rendering import escape_dot, escape_mmd, mmd_id
+from .rendering import escape_dot
 
 TOP_LEVEL_GRAPH_MAX_EDGES = 800
 
@@ -69,7 +69,6 @@ def export_graph_bundle(
     *,
     max_graph_edges: int | None = TOP_LEVEL_GRAPH_MAX_EDGES,
     traversal: GraphTraversalCache | None = None,
-    include_legacy_mermaid: bool = False,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     traversal = traversal or GraphTraversalCache.build(graph)
@@ -82,8 +81,6 @@ def export_graph_bundle(
     export_containers_csv(graph, output_dir / "containers.csv", traversal=traversal)
     export_nodes_csv(graph, output_dir / "objects.csv", traversal=traversal)
     export_edges_csv(graph, output_dir / "edges.csv", traversal=traversal)
-    if include_legacy_mermaid:
-        export_mermaid(graph, output_dir / "dependency-graph.mmd", max_edges=max_graph_edges, traversal=traversal)
     export_dot(graph, output_dir / "dependency-graph.dot", max_edges=max_graph_edges, traversal=traversal)
     metrics_payload = metrics_to_dict(graph_metrics)
     write_json(output_dir / "metrics.json", metrics_payload)
@@ -422,46 +419,6 @@ def export_edges_csv(graph: Graph, path: Path, *, traversal: GraphTraversalCache
             writer.writerow(edge.__dict__)
 
 
-def export_mermaid(
-    graph: Graph,
-    path: Path,
-    edge_filter: set[str] | None = None,
-    *,
-    max_edges: int | None = TOP_LEVEL_GRAPH_MAX_EDGES,
-    traversal: GraphTraversalCache | None = None,
-) -> None:
-    traversal = traversal or GraphTraversalCache.build(graph)
-    matching_edges = [
-        edge
-        for edge in traversal.sorted_edges
-        if edge_filter is None or edge.id in edge_filter
-    ]
-    capped = max_edges is not None and len(matching_edges) > max_edges
-    visible_edges = matching_edges[:max_edges] if capped else matching_edges
-
-    visible_node_ids = {edge.source for edge in visible_edges} | {edge.target for edge in visible_edges}
-    if not visible_edges:
-        visible_node_ids = set(graph.nodes)
-
-    lines = ["flowchart LR"]
-    if capped:
-        lines.append(
-            f'  export_note["Graph view capped at {max_edges} of {len(matching_edges)} edges. '
-            'Use graph.json or edges.csv for the full dependency graph."]'
-        )
-
-    for node in (node for node in traversal.sorted_nodes if node.id in visible_node_ids):
-        label = f"{node.source_system}/{node.env}/{node.kind}: {node.name}"
-        lines.append(f'  {mmd_id(node.id)}["{escape_mmd(label)}"]')
-
-    for edge in visible_edges:
-        lines.append(
-            f"  {mmd_id(edge.source)} -->|{escape_mmd(edge.relation)}| {mmd_id(edge.target)}"
-        )
-
-    write_text_file(path, "\n".join(lines) + "\n")
-
-
 def export_dot(
     graph: Graph,
     path: Path,
@@ -556,7 +513,7 @@ def append_capped_graph_note(lines: list[str], graph: Graph, graph_view_max_edge
             "",
             "## Graph views",
             "",
-            "- Mermaid `.mmd` graph exports are obsolete and disabled by default for large repositories.",
+            "- Mermaid `.mmd` graph exports have been fully decommissioned.",
             "- Use `graph.html` for the offline Cytoscape HTML graph report. Use `canonical-graph.json`, `containers.json`, `objects.csv`, and `edges.csv` for deterministic graph review.",
         ]
     )

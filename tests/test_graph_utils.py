@@ -5,7 +5,7 @@ from pathlib import Path
 
 from stonebranch_graph.core import Edge, Graph, Node
 from stonebranch_graph.graph_utils import degree_maps
-from stonebranch_graph.rendering import escape_dot, escape_mmd, mmd_id
+from stonebranch_graph.rendering import escape_dot
 
 
 def test_degree_maps_counts_declared_nodes_and_can_include_external_endpoints() -> None:
@@ -27,14 +27,12 @@ def test_degree_maps_counts_declared_nodes_and_can_include_external_endpoints() 
 
 
 def test_rendering_helpers_escape_common_graph_output_formats() -> None:
-    assert mmd_id("stonebranch:PROD/task A") == "n_stonebranch_PROD_task_A"
-    assert escape_mmd('task "A" | prod') == "task 'A' / prod"
     assert escape_dot('C:\\jobs\\"A"') == 'C:\\\\jobs\\\\\\"A\\"'
 
 
 def test_graph_rendering_helpers_have_single_implementation() -> None:
     root = Path(__file__).resolve().parents[1] / "stonebranch_graph"
-    definitions: dict[str, list[str]] = {"degree_maps": [], "mmd_id": [], "escape_mmd": [], "escape_dot": []}
+    definitions: dict[str, list[str]] = {"degree_maps": [], "escape_dot": []}
 
     for source_path in root.glob("*.py"):
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
@@ -44,7 +42,5 @@ def test_graph_rendering_helpers_have_single_implementation() -> None:
 
     assert definitions == {
         "degree_maps": ["graph_utils.py"],
-        "mmd_id": ["rendering.py"],
-        "escape_mmd": ["rendering.py"],
         "escape_dot": ["rendering.py"],
     }

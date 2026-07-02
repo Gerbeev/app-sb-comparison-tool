@@ -18,7 +18,6 @@ from .domain import (
     REL_SUCCESSOR_OF,
 )
 from .exporters import export_csv_rows, write_json
-from .rendering import escape_mmd, mmd_id
 from .metrics import compute_comparison_metrics, metric_rows, metrics_to_dict
 
 
@@ -562,8 +561,6 @@ def export_comparison(
     output_dir: Path,
     stonebranch: Graph,
     jil: Graph,
-    *,
-    include_legacy_mermaid: bool = False,
 ) -> None:
     compare_dir = output_dir / "compare"
     compare_dir.mkdir(parents=True, exist_ok=True)
@@ -580,8 +577,6 @@ def export_comparison(
     write_remediation_plan(compare_dir, comparison)
     from .html_graph import export_comparison_html_report
     export_comparison_html_report(comparison, stonebranch, jil, output_dir)
-    if include_legacy_mermaid:
-        write_overlay_mermaid(compare_dir / "overlay-graph.mmd", comparison, stonebranch, jil)
 
 
 def write_report(path: Path, comparison: Comparison) -> None:
@@ -866,14 +861,3 @@ def write_remediation_plan(compare_dir: Path, comparison: Comparison) -> None:
     })
     (compare_dir / "remediation-plan.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-
-def write_overlay_mermaid(path: Path, comparison: Comparison, stonebranch: Graph, jil: Graph) -> None:
-    lines = ["flowchart LR", "  classDef sbOnly fill:#ffe6e6,stroke:#cc0000,stroke-width:1px;", "  classDef jilOnly fill:#e6ecff,stroke:#0047cc,stroke-width:1px;", "  classDef matched fill:#e9ffe6,stroke:#178a00,stroke-width:1px;"]
-    for item in comparison.nodes.get("missing_in_jil", [])[:300]:
-        lines.append(f'  {mmd_id("sb_" + item["canonical_key"])}["SB only: {escape_mmd(item["kind"] + ": " + item["name"])}"]:::sbOnly')
-    for item in comparison.nodes.get("missing_in_stonebranch", [])[:300]:
-        lines.append(f'  {mmd_id("jil_" + item["canonical_key"])}["JIL only: {escape_mmd(item["kind"] + ": " + item["name"])}"]:::jilOnly')
-    for pair in comparison.nodes.get("matched", [])[:300]:
-        sb = pair["stonebranch"]
-        lines.append(f'  {mmd_id("matched_" + sb["canonical_key"])}["Matched: {escape_mmd(sb["kind"] + ": " + sb["name"])}"]:::matched')
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")

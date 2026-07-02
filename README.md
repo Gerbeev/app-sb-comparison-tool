@@ -69,7 +69,7 @@ This lets you see what is configured, what has already been generated, and what 
 
 ### 1) Build Stonebranch analysis pack
 
-Creates a self-contained folder with graph, workflow/box container views, canonical diff-friendly JSON, an offline interactive HTML graph report, indexes, metrics, and reports. Legacy Mermaid `.mmd` views are obsolete and disabled by default.
+Creates a self-contained folder with graph, workflow/box container views, canonical diff-friendly JSON, an offline interactive HTML graph report, indexes, metrics, and reports. Mermaid `.mmd` views have been fully decommissioned.
 
 ```cmd
 stonebranch-graph build-stonebranch-pack "C:\path\to\sb-orchestrator\envs\PROD" -o out\stonebranch-pack --env PROD --include-raw-values
@@ -146,7 +146,7 @@ reports/
   object-summary.csv
 ```
 
-Mermaid `.mmd` graph exports are obsolete and disabled by default because large production repositories are hard to render and navigate in Mermaid. Use `graph.html` for the offline interactive HTML graph view powered by bundled Cytoscape.js, and use `canonical-graph.json`, `containers.json`, `objects.csv`, and `edges.csv` for deterministic review and diff tools.
+Mermaid `.mmd` graph exports have been fully decommissioned because large production repositories are hard to render and navigate in Mermaid. Use `graph.html` for the offline interactive HTML graph view powered by bundled Cytoscape.js, and use `canonical-graph.json`, `containers.json`, `objects.csv`, `edges.csv`, and `dependency-graph.dot` for deterministic review and diff tools.
 
 
 `graph.json` is the source of truth. `graph.html` is the offline interactive HTML graph report generated from `graph-data.js` and the bundled `cytoscape.min.js` runtime. `canonical-graph.json` is the deterministic sorted graph projection for diff tools. `containers.json` is the workflow/box group projection: workflows/boxes are groups and tasks/jobs are children. Stonebranch dependency definition files are not exported as dependency nodes; they are normalized into task-to-task dependency edges with the original dependency file kept as edge evidence. Indexes and graph views are generated from the graph data.

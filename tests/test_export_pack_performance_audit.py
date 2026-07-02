@@ -93,16 +93,13 @@ def test_create_analysis_pack_reuses_single_traversal_cache_for_pack_outputs(tmp
     assert (tmp_path / "reports" / "relation-summary.csv").exists()
 
 
-def test_pack_graph_views_reuse_supplied_traversal_cache(tmp_path: Path, monkeypatch) -> None:
-    graph = make_dense_enough_graph(5)
-    traversal = GraphTraversalCache.build(graph)
-
+def test_pack_graph_views_do_not_build_traversal_cache(tmp_path: Path, monkeypatch) -> None:
     def fail_if_rebuilt(cls, graph: Graph) -> GraphTraversalCache:
-        raise AssertionError("write_graph_views should reuse the supplied traversal cache")
+        raise AssertionError("write_graph_views should not build traversal cache")
 
     monkeypatch.setattr(GraphTraversalCache, "build", classmethod(fail_if_rebuilt))
 
-    write_graph_views(graph, tmp_path, traversal=traversal)
+    write_graph_views(tmp_path)
 
     assert (tmp_path / "README.md").exists()
     assert not (tmp_path / "full.mmd").exists()
