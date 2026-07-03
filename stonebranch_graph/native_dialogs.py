@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import platform
 import subprocess
@@ -9,7 +10,7 @@ from shutil import which
 def pick_directory(title: str, initial_dir: Path | None = None) -> Path | None:
     initial = _existing_dir(initial_dir)
 
-    if platform.system().lower() == "windows":
+    if not _native_dialog_disabled() and platform.system().lower() == "windows":
         result = _windows_folder_dialog(title, initial)
         if result:
             return result
@@ -25,13 +26,17 @@ def pick_file(
 ) -> Path | None:
     initial = _existing_dir(initial_dir)
 
-    if platform.system().lower() == "windows":
+    if not _native_dialog_disabled() and platform.system().lower() == "windows":
         result = _windows_file_dialog(title, initial, filetypes)
         if result:
             return result
 
     result = _tk_file_dialog(title, initial, filetypes)
     return result
+
+
+def _native_dialog_disabled() -> bool:
+    return os.environ.get("SB_TOOL_NO_NATIVE_DIALOG") == "1"
 
 
 def _existing_dir(path: Path | None) -> Path:
@@ -62,6 +67,8 @@ def _windows_folder_dialog(title: str, initial_dir: Path) -> Path | None:
         return None
 
     script = f"""
+[System.Net.ServicePointManager]::CheckCertificateRevocationList = $false
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -89,6 +96,8 @@ def _windows_file_dialog(
     filter_string = "|".join(filter_parts) or "All files (*.*)|*.*"
 
     script = f"""
+[System.Net.ServicePointManager]::CheckCertificateRevocationList = $false
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
@@ -105,12 +114,18 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {{
 
 
 def _run_powershell_dialog(powershell: str, script: str) -> Path | None:
+    env = os.environ.copy()
+    env["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1"
+    env["POWERSHELL_TELEMETRY_OPTOUT"] = "1"
+    env["DOTNET_GENERATE_ASPNET_CERTIFICATE"] = "false"
+
     try:
         result = subprocess.run(
             [powershell, "-NoProfile", "-STA", "-Command", script],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=20,
+            env=env,
         )
     except Exception:
         return None

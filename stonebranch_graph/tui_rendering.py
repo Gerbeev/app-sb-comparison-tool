@@ -121,13 +121,27 @@ def color_text(text: str, *styles: str) -> str:
 
 
 def enable_windows_ansi() -> None:
-    if os.name == "nt":
-        os.system("")
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        STD_OUTPUT_HANDLE = -11
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return
+        kernel32.SetConsoleMode(handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+    except Exception:
+        pass
 
 
 def clear_screen() -> None:
     if os.environ.get("TERM") and sys.stdout.isatty():
-        os.system("cls" if os.name == "nt" else "clear")
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
 
 
 def style_for_tag(tag: str) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:

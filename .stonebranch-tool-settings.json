@@ -1,0 +1,15 @@
+{
+  "stonebranch_path": "",
+  "jil_path": "",
+  "stonebranch_graph_json": "",
+  "jil_graph_json": "",
+  "output_path": "out",
+  "stonebranch_pack_path": "out/stonebranch-pack",
+  "jil_pack_path": "out/jil-pack",
+  "compare_pack_path": "out/compare-pack",
+  "env": "PROD",
+  "mapping_path": "",
+  "include_raw_values": false,
+  "deep_scan": false,
+  "env_aware": false
+}

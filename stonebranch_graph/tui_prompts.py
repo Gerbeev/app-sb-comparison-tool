@@ -83,21 +83,52 @@ def pick_folder_setting(
     print(color_text(label, "bright_cyan", "bold"))
     if current:
         print(f"  Current: {color_text(current, 'bright_white')}")
-    print("  Opening system folder picker...")
 
-    selected = pick_directory(label, Path(current) if current else default_start)
+    gui_available = os.environ.get("SB_TOOL_NO_NATIVE_DIALOG") != "1"
+    selected: Path | None = None
+    if gui_available:
+        print("  Opening system folder picker...")
+        selected = pick_directory(label, Path(current) if current else default_start)
+
     if selected:
         print(f"  Selected: {color_text(str(selected), 'bright_white')}")
         return str(selected)
 
-    message = "Folder selection cancelled or the system picker is unavailable. Current value kept."
-    if not current:
-        message = "Folder selection cancelled or the system picker is unavailable. Value left empty."
+    message = "Folder selection cancelled or the system picker is unavailable. Falling back to manual path input."
     if warn:
         warn(message)
     else:
         print(color_text(f"⚠ {message}", "bright_yellow", "bold"))
-    return current
+
+    return _manual_path_input(label, current, allow_empty=allow_empty, want_dir=True)
+
+
+def _manual_path_input(
+    label: str,
+    current: str,
+    *,
+    allow_empty: bool,
+    want_dir: bool,
+) -> str:
+    suffix = f" [{current}]" if current else (" [empty]" if allow_empty else "")
+    while True:
+        value = input(f"  Enter path for '{label}'{suffix}: ").strip()
+        if not value:
+            if current:
+                return current
+            if allow_empty:
+                return ""
+            print(color_text("  Path cannot be empty.", "bright_red"))
+            continue
+
+        p = Path(value)
+        if want_dir and not p.is_dir():
+            print(color_text(f"  Not a valid directory: {value}", "bright_red"))
+            continue
+        if not want_dir and not p.is_file():
+            print(color_text(f"  Not a valid file: {value}", "bright_red"))
+            continue
+        return str(p)
 
 
 def pick_file_setting(
@@ -125,14 +156,24 @@ def pick_file_setting(
     if choice == "4":
         return ""
     if choice == "3":
-        return ask(label, current)
+        return _manual_path_input(label, current, allow_empty=allow_empty, want_dir=False)
 
+    if os.environ.get("SB_TOOL_NO_NATIVE_DIALOG") == "1":
+        message = "Native file picker disabled (SB_TOOL_NO_NATIVE_DIALOG=1). Falling back to manual path input."
+        if warn:
+            warn(message)
+        else:
+            print(color_text(f"⚠ {message}", "bright_yellow", "bold"))
+        return _manual_path_input(label, current, allow_empty=allow_empty, want_dir=False)
+
+    print("  Opening system file picker...")
     selected = pick_file(label, Path(current).parent if current else default_start)
     if selected:
         return str(selected)
 
+    message = "System file picker is unavailable. Falling back to manual path input."
     if warn:
-        warn("System file picker is unavailable. Use option 3 for manual input if needed.")
+        warn(message)
     else:
-        print(color_text("⚠ System file picker is unavailable. Use option 3 for manual input if needed.", "bright_yellow", "bold"))
-    return current
+        print(color_text(f"⚠ {message}", "bright_yellow", "bold"))
+    return _manual_path_input(label, current, allow_empty=allow_empty, want_dir=False)
