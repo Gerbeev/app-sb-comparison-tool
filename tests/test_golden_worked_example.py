@@ -15,7 +15,7 @@ import json
 
 from stonebranch_graph.skeleton import STRICTNESS_LEVELS
 
-from .conftest import GOLDEN_DIR
+from conftest import GOLDEN_DIR
 
 
 def test_golden_byte_identical_at_all_levels(golden_sb_skeleton, golden_jil_skeleton):

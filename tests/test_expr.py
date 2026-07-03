@@ -36,9 +36,10 @@ def test_n5_fold_requires_matching_qualifier():
 
 
 def test_n5_fold_only_applies_inside_and_not_or():
-    # s(A) | f(A) is not "done" -- OR must not fold.
+    # s(A) | f(A) is not "done" -- OR must not fold. Canonical child order sorts
+    # by (node_ref, predicate, qualifier), so FAILURE sorts before SUCCESS.
     text = "OR(A:SUCCESS, A:FAILURE)"
-    assert expr.render(expr.parse(text)) == text
+    assert expr.render(expr.parse(text)) == "OR(A:FAILURE, A:SUCCESS)"
 
 
 def test_n5_fold_preserves_unrelated_siblings():

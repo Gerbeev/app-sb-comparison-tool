@@ -17,7 +17,7 @@ from stonebranch_graph.skeleton_compare import (
 from stonebranch_graph.skeleton_normalize import erase_plumbing
 from stonebranch_graph.skeleton_stonebranch import build_stonebranch_skeleton
 
-from .conftest import build_jil_skeleton, build_sb_skeleton, write_json, write_text
+from conftest import build_jil_skeleton, build_sb_skeleton, write_json, write_text
 
 
 def _alias(data: dict) -> AliasTable:
