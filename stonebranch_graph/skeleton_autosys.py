@@ -184,6 +184,17 @@ def _entry_meta(entry: _JobEntry, alias: AliasTable | None) -> dict[str, object]
         meta["semantic_command_hash"] = semantic_command_hash(command)
     if _alias_is_plumbing(alias, entry.native_name):
         meta["plumbing"] = True
+    # Preserve the raw box_success/box_failure intent (task 09c): box_failure
+    # alone is not rendered as a completion expression (Not(...) is not a
+    # faithful "completes successfully when" reading of an AutoSys box), but
+    # the raw text stays visible in meta for a reviewer instead of only living
+    # in a misleading rendered completion string.
+    box_success = entry.job.attributes.get("box_success", "")
+    box_failure = entry.job.attributes.get("box_failure", "")
+    if box_success:
+        meta["box_success_raw"] = box_success
+    if box_failure:
+        meta["box_failure_raw"] = box_failure
     return meta
 
 
@@ -193,6 +204,18 @@ def _completion_expression(
     node_ids_by_leaf: dict[str, str],
     warnings: list[str],
 ) -> expr.Expr | None:
+    """Return the container's strict-level completion override, if any.
+
+    Only ``box_success`` is rendered as a completion expression. AutoSys
+    ``box_failure`` names the jobs whose failure fails the box; ``NOT(...)`` is
+    not a faithful "box completes successfully when" reading of that, and
+    Stonebranch has no completion analog either way (any non-null completion
+    already diffs at strict level, so this never causes a false match). The
+    raw ``box_failure`` text is preserved in ``meta["box_failure_raw"]``
+    instead (task 09c), so a reviewer sees the real AutoSys intent rather than
+    a rendered ``NOT(...)`` expression that could be misread as equivalent.
+    """
+
     if _entry_kind(entry) != KIND_CONTAINER or entry.job is None:
         return None
 
@@ -202,7 +225,7 @@ def _completion_expression(
     if box_success and box_failure:
         warnings.append(
             f"AutoSys box {entry.native_name!r} has both box_success and box_failure; "
-            "using box_success as completion."
+            "using box_success as completion (box_failure kept in meta only)."
         )
     if box_success:
         return _parse_condition(
@@ -212,15 +235,6 @@ def _completion_expression(
             node_ids_by_leaf=node_ids_by_leaf,
             warnings=warnings,
         )
-    if box_failure:
-        parsed = _parse_condition(
-            box_failure,
-            job_name=entry.native_name,
-            node_ids=node_ids,
-            node_ids_by_leaf=node_ids_by_leaf,
-            warnings=warnings,
-        )
-        return expr.Not(parsed) if parsed is not None else None
     return None
 
 

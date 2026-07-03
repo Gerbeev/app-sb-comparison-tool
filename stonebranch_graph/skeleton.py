@@ -46,6 +46,7 @@ class Skeleton:
     warnings: list[str] = field(default_factory=list)
     erasures: list[dict[str, Any]] = field(default_factory=list)
     collisions: list[dict[str, Any]] = field(default_factory=list)
+    ambiguous_externals: set[str] = field(default_factory=set)
 
     def add_node(self, node: SkeletonNode, *, merge_allowed: bool = False) -> SkeletonNode:
         """Add a node, keeping the first definition when ids duplicate.
@@ -138,6 +139,20 @@ def logical_leaf(name: str) -> str:
     return normalize_name(comparison_name(name))
 
 
+def external_id(namespace: str | None, leaf: str) -> str:
+    """Return the canonical external-reference id ``ext:<ns>/<leaf>`` (§3, §7).
+
+    ``namespace`` is optional. When given, the grammar is ``ext:<ns>/<leaf>``;
+    when absent, it degenerates to ``ext:<leaf>``. Both skeleton builders call
+    this single helper so the external id shape can never drift between the
+    AutoSys and Stonebranch sides again (task 05).
+    """
+
+    if namespace:
+        return f"{EXT_PREFIX}{namespace}/{leaf}"
+    return f"{EXT_PREFIX}{leaf}"
+
+
 def child_id(parent_id: str | None, leaf: str) -> str:
     """Return a containment-path id for a leaf under an optional parent."""
 
@@ -209,6 +224,59 @@ def index_rows(skeleton: Skeleton) -> list[dict[str, str | None]]:
     ]
 
 
+_COMPARISON_LEVELS: tuple[str, ...] = ("topology", "logic", "strict")
+
+
+@dataclass(frozen=True)
+class NodeCanonicalRecords:
+    """Precomputed per-node canonical records, lines, and hashes for all levels.
+
+    Built once per node by :func:`build_canonical_records` so comparison code
+    (``skeleton_compare.py``) never has to render, serialize, parse, or hash
+    the same node twice across the topology/logic/strict levels it needs
+    simultaneously (task 11).
+    """
+
+    id: str
+    kind: str
+    parent: str | None
+    records: dict[str, dict[str, Any]]
+    lines: dict[str, str]
+    hashes: dict[str, str]
+
+
+def build_canonical_records(skeleton: Skeleton) -> dict[str, NodeCanonicalRecords]:
+    """Return one precomputed :class:`NodeCanonicalRecords` per node, keyed by id.
+
+    Each node's record dict, serialized line, and hash for a level are
+    computed exactly once here. Downstream comparison code should derive
+    canonical maps, hash indexes, and CSV export rows from this single
+    structure instead of independently calling ``to_canonical_jsonl`` and
+    ``index_rows`` (each of which re-renders every node) several times over
+    the same skeleton.
+    """
+
+    result: dict[str, NodeCanonicalRecords] = {}
+    for node in _sorted_nodes(skeleton):
+        records: dict[str, dict[str, Any]] = {}
+        lines: dict[str, str] = {}
+        hashes: dict[str, str] = {}
+        for level in _COMPARISON_LEVELS:
+            record = _node_record(node, level=level)
+            records[level] = record
+            lines[level] = _json_line(record)
+            hashes[level] = stable_hash(record)
+        result[node.id] = NodeCanonicalRecords(
+            id=node.id,
+            kind=node.kind,
+            parent=node.parent,
+            records=records,
+            lines=lines,
+            hashes=hashes,
+        )
+    return result
+
+
 def depends_on_view(skeleton: Skeleton) -> dict[str, list[str]]:
     """Return legacy depends_on lists for pure SUCCESS conjunction triggers."""
 
@@ -274,3 +342,4 @@ def _stable_value(value: Any) -> Any:
 def _validate_level(level: str) -> None:
     if level not in STRICTNESS_LEVELS:
         raise ValueError(f"Unknown strictness level: {level}")
+

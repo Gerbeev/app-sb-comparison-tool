@@ -1,7 +1,36 @@
-"""Stonebranch raw-record to Skeleton builder."""
+"""Stonebranch raw-record to Skeleton builder.
+
+Exit-code qualifier grammar (task 03)
+--------------------------------------
+UC workflow-edge exit-code conditions are normalized to the same qualifier
+grammar the JIL side emits (``jil_condition._exitcode_expr``), so a strict-level
+comparison of an ``EXIT`` predicate is byte-identical for the same numeric
+condition on both sides:
+
+- A bare integer (``4``) or an explicit equality (``==4`` / ``=4``) normalizes
+  to ``"=4"``.
+- Comparison operators (``>=N``, ``<=N``, ``>N``, ``<N``, ``!=N``) normalize to
+  the same operator with ``==`` collapsed to ``=``, matching
+  ``jil_condition._exitcode_expr``.
+- A comma list (``1,2,3``) normalizes to a sorted, deduped list of equalities
+  joined by commas (``"=1,=2,=3"``). JIL has no multi-value exit-code literal,
+  so this form only round-trips within the Stonebranch side, but it is
+  deterministic and documented rather than silently dropped.
+- A range (``1-4``) normalizes to ``"1-4"`` with bounds sorted ascending. JIL
+  has no range literal either; the qualifier is preserved verbatim at strict
+  level so the condition is visible instead of silently degraded.
+
+Any exit-code value that does not match one of the shapes above is treated as
+an **unmapped condition** (see :func:`_edge_predicate`): it is *not* silently
+coerced to ``SUCCESS`` without a trace. The edge still uses ``SUCCESS`` for
+graph connectivity, but the raw text is recorded on the dependent node's
+``meta["unmapped_conditions"]`` and surfaced by ``skeleton_compare`` as a risk
+and a dedicated report section.
+"""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +60,7 @@ from stonebranch_graph.skeleton import (
     Skeleton,
     SkeletonNode,
     child_id,
+    external_id,
     logical_leaf,
 )
 
@@ -43,6 +73,18 @@ TASK_MONITOR_TARGET_KEYS = (
     "taskName",
     "taskMonName",
     "monitoredTask",
+)
+# UC export field variance (IMPLEMENTATION_PLAN.md §5): any of these keys may
+# carry the workflow the monitored task instance lives in, used to disambiguate
+# a monitor target when the monitored task name is reused across sub-workflow
+# instances (N6, task 06).
+TASK_MONITOR_WORKFLOW_KEYS = (
+    "taskMonitoredWorkflow",
+    "taskMonitoredWorkflowName",
+    "monitoredWorkflow",
+    "monitoredWorkflowName",
+    "taskMonWorkflow",
+    "workflowName",
 )
 TASK_MONITOR_STATUS_KEYS = (
     "statuses",
@@ -242,7 +284,19 @@ class _StonebranchSkeletonBuilder:
                     f"{definition.record.source_file}."
                 )
                 continue
-            predicate, qualifier = self._edge_predicate(edge, definition.record.source_file)
+            predicate, qualifier, unmapped = self._edge_predicate(edge)
+            if unmapped:
+                self.skeleton.warnings.append(
+                    f"Unknown Stonebranch workflow edge condition {unmapped!r} in "
+                    f"{definition.record.source_file}; using SUCCESS."
+                )
+                self.specs[target_id].meta.setdefault("unmapped_conditions", []).append(
+                    {
+                        "raw": unmapped,
+                        "source_id": source_id,
+                        "source_file": definition.record.source_file,
+                    }
+                )
             self.specs[target_id].trigger_pairs.append((source_id, predicate, qualifier))
 
         return node_id
@@ -291,12 +345,14 @@ class _StonebranchSkeletonBuilder:
             parent=parent_id,
             native_name=native_name,
             record=record,
-            meta=self._base_meta(native_name, record),
+            meta=self._base_meta(native_name, record, kind),
         )
         self.specs[node_id] = spec
         return spec
 
-    def _base_meta(self, native_name: str, record: RawRecord | None) -> dict[str, Any]:
+    def _base_meta(
+        self, native_name: str, record: RawRecord | None, kind: str
+    ) -> dict[str, Any]:
         meta: dict[str, Any] = {"src": "stonebranch", "native": native_name}
         if record is None:
             return meta
@@ -307,6 +363,17 @@ class _StonebranchSkeletonBuilder:
             meta["plumbing"] = "task_monitor"
         elif token in SLEEP_TYPE_TOKENS:
             meta["plumbing"] = "sleep"
+        elif (
+            kind != KIND_CONTAINER
+            and self.alias is not None
+            and self.alias.is_plumbing("stonebranch", native_name)
+        ):
+            # N3 (mapping-theory.md §5): the alias `plumbing` list marks
+            # dummy/gate tasks by name on both systems, not just Stonebranch
+            # objects that happen to be typed Task Monitor/Sleep. Containers
+            # (workflows) are never erased regardless of this marker; see
+            # skeleton_normalize._demote_marked_containers.
+            meta["plumbing"] = "alias"
         command = _first_command(record.data)
         if command:
             meta["command_hash"] = command_hash(command)
@@ -378,40 +445,61 @@ class _StonebranchSkeletonBuilder:
             return vertex_names.get(_name_key(task_name))
         return None
 
-    def _edge_predicate(self, edge: dict[str, Any], source_file: str) -> tuple[str, str]:
-        qualifier = self._exit_qualifier(edge)
-        if qualifier:
-            return expr.EXIT, qualifier
+    def _edge_predicate(self, edge: dict[str, Any]) -> tuple[str, str, str | None]:
+        """Return ``(predicate, qualifier, unmapped_raw)`` for a workflow edge.
+
+        ``unmapped_raw`` is ``None`` when the condition was recognized. When it
+        is not ``None``, the edge still uses ``SUCCESS`` for graph connectivity
+        (so topology stays connected), but the caller must record the raw text
+        as an unmapped condition rather than treat it as a silent, indistinguishable
+        success dependency (task 03).
+        """
+
+        exit_qualifier, exit_unparsed = self._exit_qualifier(edge)
+        if exit_qualifier:
+            return expr.EXIT, exit_qualifier, None
+        if exit_unparsed:
+            return expr.SUCCESS, "", exit_unparsed
 
         relation = self.parser._workflow_edge_relation(edge)
         if relation == REL_DEPENDS_ON_DONE:
-            return expr.DONE, ""
+            return expr.DONE, "", None
         if relation == REL_DEPENDS_ON_FAILURE:
-            return expr.FAILURE, ""
+            return expr.FAILURE, "", None
         if relation == REL_DEPENDS_ON_TERMINATED:
-            return expr.TERMINATED, ""
+            return expr.TERMINATED, "", None
         raw = self._edge_condition_text(edge)
         if raw and not _mentions_known_status(raw):
-            self.skeleton.warnings.append(
-                f"Unknown Stonebranch workflow edge condition {raw!r} in {source_file}; "
-                "using SUCCESS."
-            )
-        return expr.SUCCESS, ""
+            return expr.SUCCESS, "", raw
+        return expr.SUCCESS, "", None
 
     def _edge_condition_text(self, edge: dict[str, Any]) -> str:
         return " ".join(
             value for key in EDGE_CONDITION_KEYS if (value := _string_value(edge.get(key)))
         )
 
-    def _exit_qualifier(self, edge: dict[str, Any]) -> str:
+    def _exit_qualifier(self, edge: dict[str, Any]) -> tuple[str, str]:
+        """Return ``(qualifier, unparsed_raw)`` for an edge's exit-code fields.
+
+        Only one of the two return values is non-empty: a value that parses
+        under the grammar documented in the module docstring returns
+        ``(qualifier, "")``; a present-but-unrecognized exit-code value returns
+        ``("", raw_text)`` so the caller can flag it instead of silently
+        defaulting to ``SUCCESS``.
+        """
+
         condition_text = self._edge_condition_text(edge).lower()
         for key in EXIT_CODE_KEYS:
             if key == "value" and "exit" not in condition_text:
                 continue
-            value = _string_value(edge.get(key))
-            if value:
-                return value
-        return ""
+            raw = _string_value(edge.get(key))
+            if not raw:
+                continue
+            parsed = _parse_exit_codes_value(raw)
+            if parsed:
+                return parsed, ""
+            return "", raw
+        return "", ""
 
     def _emit_nodes(self) -> None:
         instance_index = self._instance_index()
@@ -419,7 +507,7 @@ class _StonebranchSkeletonBuilder:
             spec = self.specs[node_id]
             meta = dict(spec.meta)
             if meta.get("plumbing") == "task_monitor" and spec.record is not None:
-                meta["monitor"] = self._monitor_payload(spec, instance_index)
+                meta["monitor"] = self._monitor_payload(spec, instance_index, meta)
             self.skeleton.add_node(
                 SkeletonNode(
                     id=spec.id,
@@ -444,6 +532,7 @@ class _StonebranchSkeletonBuilder:
         self,
         spec: _NodeSpec,
         instance_index: dict[str, list[str]],
+        meta: dict[str, Any],
     ) -> dict[str, str | bool]:
         assert spec.record is not None
         target_name = _first_structure_value(
@@ -456,32 +545,96 @@ class _StonebranchSkeletonBuilder:
             self.skeleton.warnings.append(
                 f"Stonebranch task monitor {spec.native_name!r} has no monitored task name."
             )
-            target = EXT_PREFIX + "unknown"
+            target = external_id(None, "unknown")
             self.skeleton.externals.add(target)
+            self.skeleton.ambiguous_externals.add(target)
             return {"target": target, "predicate": predicate, "external": True}
 
         candidates = instance_index.get(_name_key(target_name), [])
         if not candidates:
-            target = EXT_PREFIX + logical_leaf(target_name)
+            target = self._external_target_id(target_name)
             self.skeleton.externals.add(target)
             return {"target": target, "predicate": predicate, "external": True}
+
+        # N6: the same task name can exist as several path-qualified instances
+        # (sub-workflows are inlined per use). Prefer an exact path match via a
+        # workflow-scoping hint from the export, then same-parent, then a
+        # documented deterministic fallback (task 06). Any fallback beyond an
+        # unambiguous single candidate is recorded as a first-class risk signal
+        # rather than a buried warning, because a wrong pick silently mis-wires
+        # a real dependency.
+        workflow_hint = _first_structure_value(
+            spec.record.data, TASK_MONITOR_WORKFLOW_KEYS, self.parser
+        )
+        if workflow_hint:
+            hinted = self._match_by_workflow_hint(candidates, workflow_hint)
+            if hinted is not None:
+                return {"target": hinted, "predicate": predicate, "external": False}
 
         same_parent = [
             candidate for candidate in candidates if self.specs[candidate].parent == spec.parent
         ]
-        if same_parent:
-            if len(same_parent) > 1:
-                self.skeleton.warnings.append(
-                    f"Ambiguous Stonebranch task monitor target {target_name!r} near "
-                    f"{spec.id!r}; using {same_parent[0]!r}."
-                )
-            return {"target": same_parent[0], "predicate": predicate, "external": False}
-        if len(candidates) > 1:
-            self.skeleton.warnings.append(
-                f"Ambiguous Stonebranch task monitor target {target_name!r}; using "
-                f"{candidates[0]!r}."
-            )
-        return {"target": candidates[0], "predicate": predicate, "external": False}
+        pool = same_parent or candidates
+        if len(pool) == 1:
+            return {"target": pool[0], "predicate": predicate, "external": False}
+
+        chosen = pool[0]
+        meta["ambiguous_monitor_target"] = {"name": target_name, "candidates": list(pool)}
+        self.skeleton.warnings.append(
+            f"Ambiguous Stonebranch task monitor target {target_name!r} near "
+            f"{spec.id!r}; using {chosen!r} (deterministic fallback: sorted id order; "
+            "no workflow hint disambiguated it)."
+        )
+        return {"target": chosen, "predicate": predicate, "external": False}
+
+    def _match_by_workflow_hint(self, candidates: list[str], workflow_hint: str) -> str | None:
+        """Return the single candidate whose ancestor chain names ``workflow_hint``.
+
+        Returns ``None`` when zero or more than one candidate matches, so the
+        caller falls back to same-parent/global resolution instead of guessing.
+        """
+
+        hint_key = _name_key(workflow_hint)
+        matches: list[str] = []
+        for candidate in candidates:
+            ancestor_id = self.specs[candidate].parent
+            while ancestor_id is not None:
+                ancestor = self.specs.get(ancestor_id)
+                if ancestor is None:
+                    break
+                if _name_key(ancestor.native_name) == hint_key:
+                    matches.append(candidate)
+                    break
+                ancestor_id = ancestor.parent
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def _external_target_id(self, target_name: str) -> str:
+        """Return the canonical external id for a monitor target not in this graph.
+
+        Prefers an alias entry that explicitly maps the native name to an
+        ``ext:<ns>/<leaf>`` id (task 05: unify the external grammar and let the
+        alias table state cross-instance identity). Without such an alias, the
+        namespace cannot be known, so the id degenerates to a bare
+        ``ext:<leaf>`` and is flagged as namespace-ambiguous rather than
+        silently assumed to match (or not match) the AutoSys side.
+        """
+
+        logical = _alias_logical_id(self.alias, target_name)
+        if logical:
+            stripped = logical.strip("/")
+            if stripped.startswith(EXT_PREFIX) and "/" in stripped[len(EXT_PREFIX) :]:
+                return stripped
+
+        target = external_id(None, logical_leaf(target_name))
+        self.skeleton.ambiguous_externals.add(target)
+        self.skeleton.warnings.append(
+            f"Stonebranch task monitor external target {target_name!r} has no "
+            "alias-configured namespace (expected an 'ext:<ns>/<leaf>' alias entry); "
+            f"external id {target!r} is namespace-ambiguous."
+        )
+        return target
 
     def _monitor_predicate(self, spec: _NodeSpec) -> str:
         assert spec.record is not None
@@ -499,6 +652,46 @@ class _StonebranchSkeletonBuilder:
                 )
             return expr.SUCCESS
         return predicate
+
+
+_EXIT_OP_RE = re.compile(r"(>=|<=|!=|==|=|>|<)\s*([+-]?\d+)\Z")
+_EXIT_RANGE_RE = re.compile(r"(\d+)\s*-\s*(\d+)\Z")
+_EXIT_INT_RE = re.compile(r"[+-]?\d+\Z")
+
+
+def _parse_exit_codes_value(raw: str) -> str:
+    """Parse a UC exit-code field value into the documented qualifier grammar.
+
+    Returns ``""`` when ``raw`` does not match any recognized shape, so the
+    caller can flag it as an unmapped condition instead of guessing.
+    """
+
+    text = raw.strip()
+    if not text:
+        return ""
+
+    match = _EXIT_OP_RE.match(text)
+    if match:
+        op, number = match.groups()
+        op = "=" if op == "==" else op
+        return f"{op}{int(number)}"
+
+    match = _EXIT_RANGE_RE.match(text)
+    if match:
+        low, high = sorted((int(match.group(1)), int(match.group(2))))
+        return f"{low}-{high}"
+
+    if "," in text:
+        parts = [part.strip() for part in text.split(",") if part.strip()]
+        if parts and all(_EXIT_INT_RE.match(part) for part in parts):
+            numbers = sorted({int(part) for part in parts})
+            return ",".join(f"={number}" for number in numbers)
+        return ""
+
+    if _EXIT_INT_RE.match(text):
+        return f"={int(text)}"
+
+    return ""
 
 
 def _trigger_expression(pairs: list[tuple[str, str, str]]) -> expr.Expr | None:

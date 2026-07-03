@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 
 from stonebranch_graph import expr
-from stonebranch_graph.skeleton import logical_leaf
+from stonebranch_graph.skeleton import external_id, logical_leaf
 
 _DEPENDENCY_PREDICATES = {
     "s": expr.SUCCESS,
@@ -309,7 +309,10 @@ def _node_ref(raw_name: str) -> str:
     if "^" not in raw_name:
         return logical_leaf(raw_name)
     job_name, instance = raw_name.split("^", 1)
-    return f"ext:{instance}/{logical_leaf(job_name)}"
+    # §3/§7: cross-instance references use the shared ext:<ns>/<leaf> grammar
+    # (skeleton.external_id) so the Stonebranch side's Task Monitor externals
+    # can never drift into a different id shape (task 05).
+    return external_id(instance, logical_leaf(job_name))
 
 
 def _normalize_lookback(raw_value: str, position: int) -> str:

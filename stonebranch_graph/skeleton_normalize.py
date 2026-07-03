@@ -79,6 +79,12 @@ def erase_plumbing(skeleton: Skeleton) -> Skeleton:
         nodes={node_id: _copy_node(node) for node_id, node in skeleton.nodes.items()},
         warnings=list(skeleton.warnings),
         erasures=[dict(erasure) for erasure in skeleton.erasures],
+        # Collisions and namespace-ambiguous externals are recorded while the raw
+        # skeleton is built, before erasure runs. They must be carried forward
+        # here or a fresh, empty Skeleton() silently discards them (task 02/05
+        # diagnostics would otherwise always read as zero after erase_plumbing).
+        collisions=[dict(collision) for collision in skeleton.collisions],
+        ambiguous_externals=set(skeleton.ambiguous_externals),
     )
 
     _demote_marked_containers(result)
@@ -231,13 +237,19 @@ def _erase_one(skeleton: Skeleton, reference_index: _ReferenceIndex, node_id: st
 
     del skeleton.nodes[node_id]
     reference_index.remove_node(node_id)
-    skeleton.erasures.append(
-        {
-            "id": node_id,
-            "kind": node.meta.get("plumbing"),
-            "replaced_in": sorted(replaced_in),
-        }
-    )
+    erasure: dict[str, Any] = {
+        "id": node_id,
+        "kind": node.meta.get("plumbing"),
+        "replaced_in": sorted(replaced_in),
+    }
+    # Diagnostic-only meta (task 03/06) must survive erasure: the node carrying
+    # it (typically a Task Monitor) is always plumbing and is always deleted
+    # here, so anything not carried onto the erasure record would silently
+    # vanish from the comparison-facing skeleton.
+    for diagnostic_key in ("ambiguous_monitor_target", "unmapped_conditions"):
+        if diagnostic_key in node.meta:
+            erasure[diagnostic_key] = node.meta[diagnostic_key]
+    skeleton.erasures.append(erasure)
 
 
 def _substitute_optional(

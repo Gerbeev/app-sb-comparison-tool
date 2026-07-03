@@ -158,10 +158,18 @@ def fold_done(pairs: Iterable[tuple[str, str, str]]) -> tuple[Atom, ...]:
 
 
 def topology_view(expr: Expr) -> str:
-    """Render the canonical topology projection with predicates and qualifiers erased."""
+    """Render the topology projection: a sorted set of node refs only (N9a).
 
-    projected = _project(expr, predicate=False, qualifier=False)
-    return _render_projection(projected, atom_mode="topology")
+    ``mapping-theory.md`` §5 level 1 defines topology as "node set + containment
+    + atom nodeRefs only (are the same things wired?)". Boolean AND/OR/NOT
+    structure is dropped entirely here rather than merely erasing predicates
+    and qualifiers, so ``AND(a, b)`` and ``OR(a, b)`` are topology-identical
+    (they wire the same things); the boolean shape first becomes visible at
+    the logic level. Duplicate refs from folded predicates collapse to one.
+    """
+
+    refs = sorted({atom.node_ref for atom in atoms(expr)})
+    return ", ".join(refs)
 
 
 def logic_view(expr: Expr) -> str:
@@ -246,28 +254,6 @@ def _render(expr: Expr) -> str:
 
 
 _render = lru_cache(maxsize=131_072)(_render)
-
-
-def _render_projection(expr: Expr, *, atom_mode: str) -> str:
-    canonical = canonicalize(expr)
-    if isinstance(canonical, Atom):
-        if atom_mode == "topology":
-            return canonical.node_ref
-        return _render(canonical)
-    if isinstance(canonical, And):
-        children = ", ".join(
-            _render_projection(child, atom_mode=atom_mode) for child in canonical.children
-        )
-        return f"AND({children})"
-    if isinstance(canonical, Or):
-        children = ", ".join(
-            _render_projection(child, atom_mode=atom_mode) for child in canonical.children
-        )
-        return f"OR({children})"
-    return f"NOT({_render_projection(canonical.child, atom_mode=atom_mode)})"
-
-
-_render_projection = lru_cache(maxsize=131_072)(_render_projection)
 
 
 def _project(expr: Expr, *, predicate: bool, qualifier: bool) -> Expr:

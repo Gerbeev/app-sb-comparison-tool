@@ -7,15 +7,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from stonebranch_graph.alias import AliasTable
 from stonebranch_graph.compare import command_difference_payload
 from stonebranch_graph.core import Node
 from stonebranch_graph.exporters import export_csv_rows, write_text_file
 from stonebranch_graph.metrics import metric_rows, readiness_grade
 from stonebranch_graph.skeleton import (
     STRICTNESS_LEVELS,
+    NodeCanonicalRecords,
     Skeleton,
     SkeletonNode,
-    index_rows,
+    build_canonical_records,
 )
 
 LEVELS = ("topology", "logic", "strict")
@@ -56,6 +58,12 @@ class SkeletonComparison:
     externals: dict[str, list[str]]
     meta: dict[str, Any]
     risks: list[str] = field(default_factory=list)
+    # Precomputed once per skeleton in compare_skeletons() and reused by
+    # export/report/CSV code so no node is re-rendered, re-serialized, or
+    # re-hashed after the comparison is built (task 11). Not part of
+    # ``to_dict()``: the same content is already exposed via ``entries``.
+    sb_records: dict[str, NodeCanonicalRecords] = field(default_factory=dict)
+    jil_records: dict[str, NodeCanonicalRecords] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,44 +83,90 @@ class SkeletonComparison:
         }
 
 
-def compare_skeletons(sb: Skeleton, jil: Skeleton) -> SkeletonComparison:
-    """Compare two skeletons by keyed canonical records at each strictness level."""
+def compare_skeletons(
+    sb: Skeleton, jil: Skeleton, *, alias: AliasTable | None = None
+) -> SkeletonComparison:
+    """Compare two skeletons by keyed canonical records at each strictness level.
+
+    ``alias`` is the single :class:`AliasTable` instance shared by both
+    skeleton builders (task 08): its accumulated usage accounting is threaded
+    into ``comparison.meta["alias_coverage"]`` so the report and metrics can
+    show which native names had no alias entry and which configured entries
+    were never used, instead of silently trusting an opaque match rate.
+    """
 
     _validate_levels()
-    sb_lines, sb_records = _canonical_maps(sb)
-    jil_lines, jil_records = _canonical_maps(jil)
-    sb_index = _row_index(sb)
-    jil_index = _row_index(jil)
+    # Build once, reuse everywhere: every node's per-level record dict, its
+    # serialized line, and its hash are computed exactly once here. Status
+    # comparison, reason detection, strict-line lookups, CSV export rows, and
+    # the two skeleton-*.jsonl files all read from these two structures
+    # instead of independently re-rendering/re-serializing/re-parsing the
+    # same skeletons several times over (task 11).
+    sb_records = build_canonical_records(sb)
+    jil_records = build_canonical_records(jil)
     all_ids = sorted(set(sb.nodes) | set(jil.nodes))
 
     entries: list[SkeletonDiffEntry] = []
     for node_id in all_ids:
         status_by_level = {
-            level: _status_at_level(node_id, level, sb_index, jil_index) for level in LEVELS
+            level: _status_at_level(node_id, level, sb_records, jil_records) for level in LEVELS
         }
         entries.append(
             SkeletonDiffEntry(
                 id=node_id,
                 status_by_level=status_by_level,
-                reasons=_reasons(node_id, status_by_level, sb, jil, sb_records, jil_records),
-                sb_line=sb_lines["strict"].get(node_id, ""),
-                jil_line=jil_lines["strict"].get(node_id, ""),
+                reasons=_reasons(node_id, status_by_level, sb_records, jil_records),
+                sb_line=_line_for(sb_records, node_id, "strict"),
+                jil_line=_line_for(jil_records, node_id, "strict"),
             )
         )
 
     summary_by_level = {
         level: _summary_for_level(level, entries) for level in LEVELS
     }
+    meta = _meta_layer(sb, jil)
+    if alias is not None:
+        meta["alias_coverage"] = _alias_coverage(alias)
     comparison = SkeletonComparison(
         stonebranch=sb,
         jil=jil,
         summary_by_level=summary_by_level,
         entries=entries,
         externals=_external_diff(sb, jil),
-        meta=_meta_layer(sb, jil),
+        meta=meta,
+        sb_records=sb_records,
+        jil_records=jil_records,
     )
     comparison.risks = build_skeleton_risks(comparison)
     return comparison
+
+
+def _line_for(records: dict[str, NodeCanonicalRecords], node_id: str, level: str) -> str:
+    entry = records.get(node_id)
+    return entry.lines[level] if entry is not None else ""
+
+
+def _jsonl_from_records(records: dict[str, NodeCanonicalRecords], level: str) -> str:
+    """Reassemble the same sorted JSON-Lines text ``to_canonical_jsonl`` would.
+
+    Uses the lines already computed once by ``build_canonical_records`` (task
+    11) instead of re-rendering every node again just to write this file.
+    """
+
+    lines = [records[node_id].lines[level] for node_id in sorted(records)]
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _alias_coverage(alias: AliasTable) -> dict[str, Any]:
+    unused = alias.unused_entries()
+    misses = sorted(alias.usage.logical_misses)
+    return {
+        "unused_entries": [f"{system}:{native}" for system, native in unused],
+        "unused_count": len(unused),
+        "logical_misses": [f"{system}:{native}" for system, native in misses],
+        "miss_count": len(misses),
+        "hit_count": len(alias.usage.logical_hits),
+    }
 
 
 def export_skeleton_comparison(comparison: SkeletonComparison, output_dir: Path) -> None:
@@ -123,9 +177,12 @@ def export_skeleton_comparison(comparison: SkeletonComparison, output_dir: Path)
 
     write_text_file(
         compare_dir / "skeleton-stonebranch.jsonl",
-        comparison.stonebranch.to_canonical_jsonl("strict"),
+        _jsonl_from_records(comparison.sb_records, "strict"),
     )
-    write_text_file(compare_dir / "skeleton-jil.jsonl", comparison.jil.to_canonical_jsonl("strict"))
+    write_text_file(
+        compare_dir / "skeleton-jil.jsonl",
+        _jsonl_from_records(comparison.jil_records, "strict"),
+    )
     _write_json(compare_dir / "skeleton-diff.json", comparison.to_dict())
 
     export_csv_rows(compare_dir / "skeleton-index.csv", _index_fields(), _index_rows(comparison))
@@ -168,6 +225,10 @@ def skeleton_metrics(comparison: SkeletonComparison) -> dict[str, Any]:
     sb_collisions_allowed = _allowed_collisions(comparison.stonebranch)
     jil_collisions_allowed = _allowed_collisions(comparison.jil)
     real_collisions = len(sb_collisions) + len(jil_collisions)
+    unmapped_conditions = _unmapped_condition_entries(comparison.stonebranch)
+    ambiguous_externals = _ambiguous_external_ids(comparison.stonebranch)
+    ambiguous_monitor_targets = _ambiguous_monitor_erasures(comparison.stonebranch)
+    alias_coverage = comparison.meta.get("alias_coverage") or {}
     score = max(
         0,
         min(
@@ -178,6 +239,8 @@ def skeleton_metrics(comparison: SkeletonComparison) -> dict[str, Any]:
                 - logic_changes * 4.0
                 - strict_only * 1.0
                 - real_collisions * 8.0
+                - len(unmapped_conditions) * 3.0
+                - len(ambiguous_monitor_targets) * 3.0
             ),
         ),
     )
@@ -191,6 +254,13 @@ def skeleton_metrics(comparison: SkeletonComparison) -> dict[str, Any]:
         "jil_collisions": len(jil_collisions),
         "sb_collisions_allowed": len(sb_collisions_allowed),
         "jil_collisions_allowed": len(jil_collisions_allowed),
+        "sb_unmapped_conditions": len(unmapped_conditions),
+        "sb_ambiguous_externals": len(ambiguous_externals),
+        "sb_ambiguous_monitor_targets": len(ambiguous_monitor_targets),
+        # N1 misses are legitimate signal, not penalized; unused entries usually
+        # mean a typo silently weakening matching, so they are still counted.
+        "alias_unused": int(alias_coverage.get("unused_count", 0)),
+        "alias_miss": int(alias_coverage.get("miss_count", 0)),
         "skeleton_readiness_score": score,
         "readiness_grade": readiness_grade(score),
     }
@@ -212,7 +282,60 @@ def build_skeleton_risks(comparison: SkeletonComparison) -> list[str]:
             "Alias/id collisions dropped native objects that were not on the merge "
             "allow-list; those definitions are missing from the comparison."
         )
+    if _unmapped_condition_entries(comparison.stonebranch):
+        risks.append(
+            "Unrecognized Stonebranch workflow edge conditions or exit-code values were "
+            "coerced to SUCCESS for graph connectivity; see 'Unmapped connector conditions'."
+        )
+    if _ambiguous_external_ids(comparison.stonebranch):
+        risks.append(
+            "Stonebranch Task Monitor external targets have no alias-configured namespace; "
+            "their ext:<leaf> ids may not match the AutoSys side's ext:<ns>/<leaf> ids."
+        )
+    if _ambiguous_monitor_erasures(comparison.stonebranch):
+        risks.append(
+            "A Stonebranch Task Monitor target name matched more than one in-graph instance "
+            "and was resolved by deterministic fallback, not by an unambiguous hint."
+        )
+    alias_coverage = comparison.meta.get("alias_coverage")
+    if alias_coverage and alias_coverage.get("unused_count"):
+        risks.append(
+            "Alias table has entries that were never used; likely a typo or stale native "
+            "name silently weakening matching."
+        )
     return risks
+
+
+def _unmapped_condition_entries(skeleton: Skeleton) -> list[dict[str, Any]]:
+    """Nodes whose incoming Stonebranch edge condition could not be mapped (task 03)."""
+
+    entries: list[dict[str, Any]] = []
+    for node_id in sorted(skeleton.nodes):
+        for item in skeleton.nodes[node_id].meta.get("unmapped_conditions", []) or []:
+            entries.append({"id": node_id, **item})
+    return entries
+
+
+def _ambiguous_external_ids(skeleton: Skeleton) -> list[str]:
+    """Namespace-ambiguous external ids produced by the Stonebranch builder (task 05)."""
+
+    return sorted(skeleton.ambiguous_externals)
+
+
+def _ambiguous_monitor_erasures(skeleton: Skeleton) -> list[dict[str, Any]]:
+    """Erasure records for Task Monitors whose target was picked by fallback (task 06).
+
+    Task Monitors are always erased as plumbing, so this diagnostic is read
+    from ``skeleton.erasures`` (populated by ``skeleton_normalize._erase_one``)
+    rather than from node meta, which no longer exists once the monitor node
+    itself has been deleted.
+    """
+
+    return [
+        erasure
+        for erasure in skeleton.erasures
+        if erasure.get("ambiguous_monitor_target")
+    ]
 
 
 def write_skeleton_report(
@@ -224,7 +347,10 @@ def write_skeleton_report(
         "`skeleton-stonebranch.jsonl` and `skeleton-jil.jsonl` are strict canonical",
         "serializations designed for direct `git diff` review.",
         "",
-        "Topology compares ids, kind, parent, and dependency shape with predicates erased.",
+        "Topology compares ids, kind, parent, and the set of dependency node refs only:",
+        "predicates, qualifiers, and AND/OR boolean shape are all erased (N9a). Two nodes",
+        "wired to the same things are topology-identical even if one uses AND and the",
+        "other OR; that distinction first appears at the logic level.",
         "Logic keeps dependency predicates but erases qualifiers such as lookback windows.",
         "Strict keeps the full canonical skeleton line, including qualifiers and completion.",
         "",
@@ -252,6 +378,10 @@ def write_skeleton_report(
     )
     _append_plumbing_section(lines, comparison)
     _append_id_collisions(lines, comparison)
+    _append_unmapped_conditions(lines, comparison)
+    _append_ambiguous_externals(lines, comparison)
+    _append_ambiguous_monitor_targets(lines, comparison)
+    _append_alias_coverage(lines, comparison)
     _append_changed_nodes(lines, comparison)
     _append_qualifier_only(lines, comparison)
     _append_only_in(lines, comparison)
@@ -313,40 +443,19 @@ def _validate_levels() -> None:
         raise ValueError(f"Skeleton model does not support strictness levels: {sorted(missing)}")
 
 
-def _canonical_maps(
-    skeleton: Skeleton,
-) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, dict[str, Any]]]]:
-    lines_by_level: dict[str, dict[str, str]] = {}
-    records_by_level: dict[str, dict[str, dict[str, Any]]] = {}
-    for level in LEVELS:
-        lines_by_level[level] = {}
-        records_by_level[level] = {}
-        for line in skeleton.to_canonical_jsonl(level).splitlines():
-            if not line.strip():
-                continue
-            record = json.loads(line)
-            node_id = str(record["id"])
-            lines_by_level[level][node_id] = line
-            records_by_level[level][node_id] = record
-    return lines_by_level, records_by_level
-
-
-def _row_index(skeleton: Skeleton) -> dict[str, dict[str, str | None]]:
-    return {str(row["id"]): row for row in index_rows(skeleton)}
-
-
 def _status_at_level(
     node_id: str,
     level: str,
-    sb_index: dict[str, dict[str, str | None]],
-    jil_index: dict[str, dict[str, str | None]],
+    sb_records: dict[str, NodeCanonicalRecords],
+    jil_records: dict[str, NodeCanonicalRecords],
 ) -> str:
-    if node_id not in sb_index:
+    sb_entry = sb_records.get(node_id)
+    jil_entry = jil_records.get(node_id)
+    if sb_entry is None:
         return "only_in_jil"
-    if node_id not in jil_index:
+    if jil_entry is None:
         return "only_in_stonebranch"
-    hash_key = f"{level}_hash"
-    if sb_index[node_id][hash_key] == jil_index[node_id][hash_key]:
+    if sb_entry.hashes[level] == jil_entry.hashes[level]:
         return "matched"
     return "changed"
 
@@ -354,19 +463,19 @@ def _status_at_level(
 def _reasons(
     node_id: str,
     status_by_level: dict[str, str],
-    sb: Skeleton,
-    jil: Skeleton,
-    sb_records: dict[str, dict[str, dict[str, Any]]],
-    jil_records: dict[str, dict[str, dict[str, Any]]],
+    sb_records: dict[str, NodeCanonicalRecords],
+    jil_records: dict[str, NodeCanonicalRecords],
 ) -> list[str]:
-    if node_id not in sb.nodes or node_id not in jil.nodes:
+    sb_entry = sb_records.get(node_id)
+    jil_entry = jil_records.get(node_id)
+    if sb_entry is None or jil_entry is None:
         return []
 
     reasons: set[str] = set()
-    sb_strict = sb_records["strict"][node_id]
-    jil_strict = jil_records["strict"][node_id]
-    sb_logic = sb_records["logic"][node_id]
-    jil_logic = jil_records["logic"][node_id]
+    sb_strict = sb_entry.records["strict"]
+    jil_strict = jil_entry.records["strict"]
+    sb_logic = sb_entry.records["logic"]
+    jil_logic = jil_entry.records["logic"]
 
     if sb_strict.get("kind") != jil_strict.get("kind"):
         reasons.add("kind_changed")
@@ -452,22 +561,24 @@ def _index_fields() -> list[str]:
 
 
 def _index_rows(comparison: SkeletonComparison) -> list[dict[str, str]]:
-    sb_index = {row["id"]: row for row in index_rows(comparison.stonebranch)}
-    jil_index = {row["id"]: row for row in index_rows(comparison.jil)}
+    # Reuse the hashes computed once in compare_skeletons() instead of calling
+    # index_rows() again, which would re-render and re-hash every node (task 11).
+    sb_records = comparison.sb_records
+    jil_records = comparison.jil_records
     rows: list[dict[str, str]] = []
     for entry in comparison.entries:
-        sb_row = sb_index.get(entry.id, {})
-        jil_row = jil_index.get(entry.id, {})
+        sb_entry = sb_records.get(entry.id)
+        jil_entry = jil_records.get(entry.id)
         rows.append(
             {
                 "id": entry.id,
                 "sides": _sides(entry),
-                "topology_hash_sb": str(sb_row.get("topology_hash") or ""),
-                "topology_hash_jil": str(jil_row.get("topology_hash") or ""),
-                "logic_hash_sb": str(sb_row.get("logic_hash") or ""),
-                "logic_hash_jil": str(jil_row.get("logic_hash") or ""),
-                "strict_hash_sb": str(sb_row.get("strict_hash") or ""),
-                "strict_hash_jil": str(jil_row.get("strict_hash") or ""),
+                "topology_hash_sb": sb_entry.hashes["topology"] if sb_entry else "",
+                "topology_hash_jil": jil_entry.hashes["topology"] if jil_entry else "",
+                "logic_hash_sb": sb_entry.hashes["logic"] if sb_entry else "",
+                "logic_hash_jil": jil_entry.hashes["logic"] if jil_entry else "",
+                "strict_hash_sb": sb_entry.hashes["strict"] if sb_entry else "",
+                "strict_hash_jil": jil_entry.hashes["strict"] if jil_entry else "",
                 "status_topology": entry.status_by_level["topology"],
                 "status_logic": entry.status_by_level["logic"],
                 "status_strict": entry.status_by_level["strict"],
@@ -639,6 +750,109 @@ def _append_id_collisions(lines: list[str], comparison: SkeletonComparison) -> N
             f"{_cell(item.get('dropped_native', ''))} | {_cell(item.get('kept_src', ''))} | "
             f"{_cell(item.get('dropped_src', ''))} | {status} |"
         )
+
+
+def _append_unmapped_conditions(lines: list[str], comparison: SkeletonComparison) -> None:
+    rows = _unmapped_condition_entries(comparison.stonebranch)
+    lines.extend(
+        [
+            "",
+            "## Unmapped connector conditions",
+            "",
+            "Stonebranch workflow edges whose condition text or exit-code value could not be",
+            "mapped to a known predicate. The edge still uses SUCCESS for graph connectivity,",
+            "but that is a placeholder, not a verified match: review these before trusting a",
+            "'matched' verdict on the affected node.",
+            "",
+            "| Successor id | Raw condition | Predecessor | Source file |",
+            "|---|---|---|---|",
+        ]
+    )
+    if not rows:
+        lines.append("| n/a | n/a | n/a | No unmapped connector conditions detected. |")
+        return
+    for item in rows[:200]:
+        lines.append(
+            f"| `{item.get('id', '')}` | {_cell(item.get('raw', ''))} | "
+            f"`{_cell(item.get('source_id', ''))}` | {_cell(item.get('source_file', ''))} |"
+        )
+
+
+def _append_ambiguous_externals(lines: list[str], comparison: SkeletonComparison) -> None:
+    rows = _ambiguous_external_ids(comparison.stonebranch)
+    lines.extend(
+        [
+            "",
+            "## Namespace-ambiguous externals",
+            "",
+            "Stonebranch Task Monitor targets outside this graph with no alias entry mapping",
+            "them to a namespaced `ext:<ns>/<leaf>` id. Their bare `ext:<leaf>` id may not",
+            "match the AutoSys side's `ext:<ns>/<leaf>` id for the same external dependency.",
+            "",
+            "| External id |",
+            "|---|",
+        ]
+    )
+    if not rows:
+        lines.append("| No namespace-ambiguous externals detected. |")
+        return
+    for item in rows[:200]:
+        lines.append(f"| `{item}` |")
+
+
+def _append_ambiguous_monitor_targets(lines: list[str], comparison: SkeletonComparison) -> None:
+    rows = _ambiguous_monitor_erasures(comparison.stonebranch)
+    lines.extend(
+        [
+            "",
+            "## Ambiguous monitor targets",
+            "",
+            "Stonebranch Task Monitors whose monitored task name matched more than one",
+            "in-graph instance (N6 sub-workflow expansion) with no workflow hint to pick the",
+            "right one. A deterministic fallback was used; verify the substituted trigger",
+            "points at the intended instance.",
+            "",
+            "| Monitor id | Monitored name | Candidates |",
+            "|---|---|---|",
+        ]
+    )
+    if not rows:
+        lines.append("| n/a | n/a | No ambiguous monitor targets detected. |")
+        return
+    for item in rows[:200]:
+        target = item.get("ambiguous_monitor_target") or {}
+        candidates = ", ".join(target.get("candidates", []))
+        lines.append(
+            f"| `{item.get('id', '')}` | {_cell(target.get('name', ''))} | "
+            f"{_cell(candidates)} |"
+        )
+
+
+def _append_alias_coverage(lines: list[str], comparison: SkeletonComparison) -> None:
+    coverage = comparison.meta.get("alias_coverage")
+    lines.extend(["", "## Alias coverage", ""])
+    if not coverage:
+        lines.append("- Alias usage was not tracked for this comparison.")
+        return
+    lines.extend(
+        [
+            f"- Aliased hits: **{coverage.get('hit_count', 0)}**",
+            f"- Native names with no alias entry (leaf-matched, may be coincidental): "
+            f"**{coverage.get('miss_count', 0)}**",
+            f"- Configured alias entries never used (typo/stale name risk): "
+            f"**{coverage.get('unused_count', 0)}**",
+            "",
+        ]
+    )
+    unused = coverage.get("unused_entries") or []
+    if unused:
+        lines.append("Unused alias entries:")
+        lines.extend(f"- `{entry}`" for entry in unused[:100])
+    misses = coverage.get("logical_misses") or []
+    if misses:
+        lines.append("")
+        lines.append("Native names matched by normalized leaf only (no alias entry):")
+        lines.extend(f"- `{entry}`" for entry in misses[:100])
 
 
 def _append_warning_list(lines: list[str], title: str, warnings: list[str]) -> None:

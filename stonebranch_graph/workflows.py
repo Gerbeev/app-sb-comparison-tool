@@ -480,7 +480,7 @@ def compare_skeleton_direct(
         export_skeleton_bundle(sb_skeleton, output_dir / "stonebranch")
         export_skeleton_bundle(jil_skeleton, output_dir / "jil")
 
-        comparison = compare_skeletons(sb_skeleton, jil_skeleton)
+        comparison = compare_skeletons(sb_skeleton, jil_skeleton, alias=alias)
         export_skeleton_comparison(comparison, output_dir)
         export_skeleton_comparison_html(
             comparison,

@@ -1111,6 +1111,15 @@ for(const e of DATA.edges || []){
   (outEdges[e.source] ||= []).push(e);
   (inEdges[e.target] ||= []).push(e);
 }
+// Precomputed group -> children index (perf: avoids an O(jobs) scan per group
+// per visibility check; groupHasMatchingChild becomes O(children of group)).
+// Jobs are the same objects referenced by DATA.jobs, so status mutations from
+// applyStrictnessStatuses() are visible here too without rebuilding the index.
+const childrenByGroup = {};
+for(const j of DATA.jobs || []){
+  if(j.group) (childrenByGroup[j.group] ||= []).push(j);
+}
+const LARGE_GRAPH_ELEMENT_THRESHOLD = 1500;
 
 function escapeHtml(value){
   return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -1162,7 +1171,7 @@ function copyText(value){
   if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(value).catch(()=>{});
 }
 function groupHasMatchingChild(groupId){
-  return (DATA.jobs || []).some(j => j.group === groupId && statusMatches(j.status));
+  return (childrenByGroup[groupId] || []).some(j => statusMatches(j.status));
 }
 function nodeMatchesCurrentStatus(n){
   if(activeStatusFilter === 'all') return true;
@@ -1170,22 +1179,41 @@ function nodeMatchesCurrentStatus(n){
   if(groupById[n.id] && groupHasMatchingChild(n.id)) return true;
   return false;
 }
-function visibleNodes(){
+// visibleNodes()/visibleEdges() are the hottest path in the viewer: every
+// rebuild (buildCy/relayout), every filter toggle, and every selection touches
+// them. computeVisibleData() does the O(groups+jobs+edges) scan exactly once
+// per distinct combination of the inputs that can change its result; repeated
+// calls with the same inputs (e.g. visibleEdges() re-deriving visibleNodes(),
+// or toCytoscapeElements() calling both) reuse the cached result instead of
+// re-scanning (perf task 10).
+let visibleCache = null;
+function visibleCacheKey(){
+  return [activeStatusFilter, [...visibleCategories].sort().join(','), expanded, activeStrictnessLevel].join('|');
+}
+function computeVisibleData(){
   const base = expanded || !(DATA.groups || []).length ? [...DATA.groups, ...DATA.jobs] : DATA.groups.slice();
-  return base
+  const nodes = base
     .map(n => ({...n, type: groupById[n.id] ? 'group' : 'job'}))
     .filter(n => nodeMatchesCurrentStatus(n));
-}
-function visibleEdges(){
-  const nodes = new Set(visibleNodes().map(n => n.id));
-  return (DATA.edges || []).filter(e => {
-    if(!nodes.has(e.source) || !nodes.has(e.target)) return false;
+  const nodeIds = new Set(nodes.map(n => n.id));
+  const edges = (DATA.edges || []).filter(e => {
+    if(!nodeIds.has(e.source) || !nodeIds.has(e.target)) return false;
     if(activeStatusFilter !== 'all' && e.status && !statusMatches(e.status) && !statusMatches(nodeById[e.source]?.status) && !statusMatches(nodeById[e.target]?.status)) return false;
     if(!expanded && (DATA.groups || []).length && e.category !== 'contains' && !isSkeletonReport) return false;
     if(visibleCategories.has('all')) return true;
     return visibleCategories.has(e.category);
   });
+  return {nodes, nodeIds, edges};
 }
+function visibleData(){
+  const key = visibleCacheKey();
+  if(!visibleCache || visibleCache.key !== key){
+    visibleCache = {key, ...computeVisibleData()};
+  }
+  return visibleCache;
+}
+function visibleNodes(){ return visibleData().nodes; }
+function visibleEdges(){ return visibleData().edges; }
 function rankedPositions(nodes, edges){
   const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
   const indegree = Object.fromEntries(nodes.map(n => [n.id, 0]));
@@ -1224,9 +1252,11 @@ function rankedPositions(nodes, edges){
   return positions;
 }
 function toCytoscapeElements(){
-  const nodes = visibleNodes();
-  const nodeIds = new Set(nodes.map(n => n.id));
-  const edges = visibleEdges();
+  // Single visibleData() call: nodes, the node-id membership Set, and edges
+  // are all derived from one cached computation instead of visibleNodes()
+  // and visibleEdges() each re-deriving their own node-id set (perf task 10).
+  const {nodes, nodeIds, edges} = visibleData();
+  const isLarge = (nodes.length + edges.length) > LARGE_GRAPH_ELEMENT_THRESHOLD;
   const cyNodes = nodes.map(n => {
     const data = {
       ...n,
@@ -1237,14 +1267,14 @@ function toCytoscapeElements(){
     };
     const parent = expanded ? (n.parent || n.group) : null;
     if(parent && nodeIds.has(parent)) data.parent = parent;
-    return {group:'nodes', data, classes:`${n.type} ${n.external ? 'external' : ''} ${isProblemStatus(n.status) ? 'problem' : ''}`};
+    return {group:'nodes', data, classes:`${n.type} ${n.external ? 'external' : ''} ${isProblemStatus(n.status) ? 'problem' : ''} ${isLarge ? 'lg' : ''}`};
   });
   const cyEdges = edges.map(e => ({
     group:'edges',
     data:{...e, label:text((e.predicate === 'SUCCESS' && !e.qualifier) ? '' : (e.label || e.relation), 24), color:edgeColor(e.category, e.status, e.predicate)},
-    classes:`${e.category || 'other'} ${e.or_group !== null && e.or_group !== undefined ? 'or-group' : ''} ${e.predicate && e.predicate !== 'SUCCESS' ? 'non-success' : ''} ${isProblemStatus(e.status) ? 'problem' : ''}`
+    classes:`${e.category || 'other'} ${e.or_group !== null && e.or_group !== undefined ? 'or-group' : ''} ${e.predicate && e.predicate !== 'SUCCESS' ? 'non-success' : ''} ${isProblemStatus(e.status) ? 'problem' : ''} ${isLarge ? 'lg' : ''}`
   }));
-  return {nodes, edges, elements:[...cyNodes, ...cyEdges]};
+  return {nodes, edges, elements:[...cyNodes, ...cyEdges], isLarge};
 }
 function layoutOptions(nodes, edges){
   const positions = rankedPositions(nodes, edges);
@@ -1266,6 +1296,14 @@ function buildCy(){
     wheelSensitivity:0.18,
     minZoom:0.08,
     maxZoom:3.5,
+    // Node-count-gated performance options (task 10): below the threshold
+    // these are all false/default, so small graphs render pixel-identical to
+    // before. Above it, viewport-only rendering during pan/zoom keeps
+    // thousands of elements interactive; nothing in DATA is ever omitted,
+    // only deferred during motion.
+    hideEdgesOnViewport: graph.isLarge,
+    textureOnViewport: graph.isLarge,
+    motionBlur: !graph.isLarge,
     style:[
       {selector:'node', style:{'background-color':'data(color)','border-color':'data(borderColor)','border-width':2,'label':'data(label)','color':'#fff','font-size':11,'font-weight':700,'text-valign':'center','text-halign':'center','text-wrap':'wrap','text-max-width':112,'text-outline-color':'data(color)','text-outline-width':2}},
       {selector:'node.group', style:{'shape':'round-rectangle','width':128,'height':58,'background-opacity':0.9,'padding':'18px','text-max-width':116}},
@@ -1275,7 +1313,13 @@ function buildCy(){
       {selector:'edge', style:{'width':2,'line-color':'data(color)','target-arrow-color':'data(color)','target-arrow-shape':'triangle','curve-style':'bezier','label':'data(label)','font-size':9,'color':'#475569','text-background-color':'#fff','text-background-opacity':0.75,'text-background-padding':2,'text-rotation':'autorotate'}},
       {selector:'edge.non-success', style:{'width':3,'color':'#991b1b','font-weight':700}},
       {selector:'edge.or-group', style:{'line-style':'dashed'}},
+      // Cheaper rendering above the size threshold (task 10): straight
+      // (haystack) edges instead of bezier curves, and no per-node text
+      // outline. Labels stay visible on both nodes and edges either way.
+      {selector:'node.lg', style:{'text-outline-width':0}},
+      {selector:'edge.lg', style:{'curve-style':'haystack'}},
       {selector:'.highlight', style:{'z-index':999,'border-width':5,'width':4,'opacity':1}},
+      {selector:'edge.highlight, edge:selected', style:{'curve-style':'bezier'}},
       {selector:'.faded', style:{'opacity':0.16}},
       {selector:':selected', style:{'border-color':'#111827','border-width':4,'line-color':'#111827','target-arrow-color':'#111827'}}
     ]
@@ -1288,8 +1332,13 @@ function buildCy(){
 }
 function relayout(){
   const graph = toCytoscapeElements();
-  cy.elements().remove();
-  cy.add(graph.elements);
+  // Batch the teardown+rebuild of the element set (task 10): cy.batch defers
+  // style/layout recalculation until the whole block finishes instead of
+  // reacting to the remove() and each add() separately.
+  cy.batch(() => {
+    cy.elements().remove();
+    cy.add(graph.elements);
+  });
   cy.layout(layoutOptions(graph.nodes, graph.edges)).run();
   cy.fit(undefined, 45);
   updateCounts();
