@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import re
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -112,7 +112,7 @@ class Graph:
         }
 
     @staticmethod
-    def from_dict(data: dict[str, Any]) -> "Graph":
+    def from_dict(data: dict[str, Any]) -> Graph:
         graph = Graph(source_system=data.get("source_system", "unknown"), env=data.get("env", "default"))
         for node_data in data.get("nodes", []):
             node = Node(**node_data)

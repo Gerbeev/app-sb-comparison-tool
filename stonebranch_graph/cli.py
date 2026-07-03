@@ -1,21 +1,24 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from .config import AnalyzerConfig
 from .logging_utils import log_error
-from .tui import run_tui
 from .triage import create_triage_report
+from .tui import run_tui
 from .workflows import (
     build_jil_graph,
     build_jil_pack,
+    build_jil_skeleton_workflow,
     build_stonebranch_graph,
     build_stonebranch_pack,
+    build_stonebranch_skeleton_workflow,
     compare_direct,
     compare_graph_json,
     compare_packs,
+    compare_skeleton_direct,
     profile_jil_schema,
     profile_stonebranch_schema,
 )
@@ -38,7 +41,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_build_stonebranch_parser(subparsers)
     add_build_jil_parser(subparsers)
+    add_build_skeleton_parsers(subparsers)
     add_compare_parser(subparsers)
+    add_compare_skeleton_parser(subparsers)
     add_profile_parsers(subparsers)
     add_pack_parsers(subparsers)
     add_existing_graph_compare_parser(subparsers)
@@ -64,6 +69,10 @@ def add_stonebranch_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--deep-scan", action="store_true")
 
 
+def add_skeleton_alias_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--alias", type=Path, default=None)
+
+
 def add_build_stonebranch_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("build-stonebranch", help="Build graph from Stonebranch folder JSON export.")
     add_source_output(parser)
@@ -76,6 +85,25 @@ def add_build_jil_parser(subparsers: argparse._SubParsersAction[argparse.Argumen
     add_env_options(parser)
 
 
+def add_build_skeleton_parsers(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    stonebranch = subparsers.add_parser(
+        "build-skeleton-stonebranch",
+        help="Build a canonical skeleton from Stonebranch JSON exports.",
+    )
+    add_source_output(stonebranch)
+    stonebranch.add_argument("--env", default="default")
+    stonebranch.add_argument("--env-aware", action="store_true")
+    add_skeleton_alias_option(stonebranch)
+
+    jil = subparsers.add_parser(
+        "build-skeleton-jil",
+        help="Build a canonical skeleton from AutoSys JIL files.",
+    )
+    add_source_output(jil)
+    jil.add_argument("--env", default="default")
+    add_skeleton_alias_option(jil)
+
+
 def add_compare_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("compare", help="Build and compare Stonebranch JSON graph against AutoSys JIL graph.")
     parser.add_argument("--stonebranch", type=Path, required=True)
@@ -85,7 +113,24 @@ def add_compare_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     parser.add_argument("--env-aware", action="store_true")
     parser.add_argument("--deep-scan", action="store_true")
     parser.add_argument("--mapping", type=Path, default=None)
+    parser.add_argument("--alias", type=Path, default=None)
     parser.add_argument("--include-raw-values", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--skeleton", dest="skeleton", action="store_true", default=True)
+    mode.add_argument("--legacy", dest="skeleton", action="store_false")
+
+
+def add_compare_skeleton_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "compare-skeleton",
+        help="Build and compare Stonebranch and JIL canonical skeletons.",
+    )
+    parser.add_argument("--stonebranch", type=Path, required=True)
+    parser.add_argument("--jil", type=Path, required=True)
+    parser.add_argument("-o", "--output", type=Path, required=True)
+    parser.add_argument("--env", default="default")
+    parser.add_argument("--env-aware", action="store_true")
+    add_skeleton_alias_option(parser)
 
 
 def add_profile_parsers(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -129,7 +174,10 @@ def run_command(args: argparse.Namespace, config: AnalyzerConfig) -> int:
     handlers = {
         "build-stonebranch": handle_build_stonebranch,
         "build-jil": handle_build_jil,
+        "build-skeleton-stonebranch": handle_build_skeleton_stonebranch,
+        "build-skeleton-jil": handle_build_skeleton_jil,
         "compare": handle_compare_direct,
+        "compare-skeleton": handle_compare_skeleton,
         "profile-stonebranch": handle_profile_stonebranch,
         "profile-jil": handle_profile_jil,
         "build-stonebranch-pack": handle_build_stonebranch_pack,
@@ -168,7 +216,44 @@ def handle_build_jil(args: argparse.Namespace, config: AnalyzerConfig) -> int:
     return 0
 
 
+def handle_build_skeleton_stonebranch(args: argparse.Namespace, config: AnalyzerConfig) -> int:
+    result = build_stonebranch_skeleton_workflow(
+        args.input,
+        args.output,
+        config,
+        alias_path=args.alias,
+        env=args.env,
+        env_aware=args.env_aware,
+    )
+    print(
+        "OK: Stonebranch skeleton: "
+        f"nodes={len(result.skeleton.nodes)} erasures={len(result.skeleton.erasures)}"
+    )
+    print(f"OK: output={args.output.resolve()}")
+    return 0
+
+
+def handle_build_skeleton_jil(args: argparse.Namespace, config: AnalyzerConfig) -> int:
+    result = build_jil_skeleton_workflow(
+        args.input,
+        args.output,
+        config,
+        alias_path=args.alias,
+        env=args.env,
+    )
+    print(
+        f"OK: JIL skeleton: nodes={len(result.skeleton.nodes)} "
+        f"erasures={len(result.skeleton.erasures)}"
+    )
+    print(f"OK: output={args.output.resolve()}")
+    return 0
+
+
 def handle_compare_direct(args: argparse.Namespace, config: AnalyzerConfig) -> int:
+    if args.skeleton:
+        print("INFO: compare defaults to the skeleton pipeline. Use --legacy for the old graph comparison.")
+        return handle_compare_skeleton(args, config)
+
     result = compare_direct(
         stonebranch_path=args.stonebranch,
         jil_path=args.jil,
@@ -186,6 +271,32 @@ def handle_compare_direct(args: argparse.Namespace, config: AnalyzerConfig) -> i
     print(f"OK: Stonebranch nodes={len(sb_graph.nodes)} edges={len(sb_graph.edges)}")
     print(f"OK: JIL nodes={len(jil_graph.nodes)} edges={len(jil_graph.edges)}")
     print(f"OK: matched nodes={result.summary['matched_nodes']} matched edges={result.summary['matched_edges']}")
+    print(f"OK: output={args.output.resolve()}")
+    return 0
+
+
+def handle_compare_skeleton(args: argparse.Namespace, config: AnalyzerConfig) -> int:
+    result = compare_skeleton_direct(
+        stonebranch_path=args.stonebranch,
+        jil_path=args.jil,
+        output_dir=args.output,
+        config=config,
+        alias_path=args.alias,
+        env=args.env,
+        env_aware=args.env_aware,
+    )
+    topology = result.comparison.summary_by_level["topology"]
+    logic = result.comparison.summary_by_level["logic"]
+    strict = result.comparison.summary_by_level["strict"]
+    print(
+        "OK: skeleton topology: "
+        f"matched={topology['matched']} changed={topology['changed']} "
+        f"only_sb={topology['only_in_stonebranch']} only_jil={topology['only_in_jil']}"
+    )
+    print(
+        "OK: skeleton logic/strict changed: "
+        f"logic={logic['changed']} strict={strict['changed']}"
+    )
     print(f"OK: output={args.output.resolve()}")
     return 0
 

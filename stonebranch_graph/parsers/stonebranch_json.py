@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import re
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from stonebranch_graph.config import AnalyzerConfig
@@ -10,12 +11,12 @@ from stonebranch_graph.core import (
     Edge,
     Graph,
     Node,
+    enterprise_name_parts,
     make_canonical_key,
     make_edge_id,
     make_node_id,
     redacted_preview,
     stable_hash,
-    enterprise_name_parts,
 )
 from stonebranch_graph.domain import (
     KIND_AGENT,
@@ -26,12 +27,14 @@ from stonebranch_graph.domain import (
     KIND_CREDENTIAL,
     KIND_EMAIL_TEMPLATE,
     KIND_FILE,
+    KIND_FILE_WATCHER,
     KIND_OBJECT,
     KIND_SCRIPT,
     KIND_TASK,
     KIND_TRIGGER,
     KIND_VARIABLE,
     KIND_WORKFLOW,
+    REL_CONTAINS,
     REL_DEPENDS_ON,
     REL_DEPENDS_ON_DONE,
     REL_DEPENDS_ON_FAILURE,
@@ -39,7 +42,6 @@ from stonebranch_graph.domain import (
     REL_DEPENDS_ON_SUCCESS,
     REL_DEPENDS_ON_TERMINATED,
     REL_REFERENCES,
-    REL_CONTAINS,
     REL_RUNS_COMMAND,
     REL_RUNS_ON,
     REL_RUNS_ON_CLUSTER,
@@ -54,7 +56,6 @@ from stonebranch_graph.domain import (
     REL_WATCHES_FILE,
     SOURCE_STONEBRANCH,
 )
-from stonebranch_graph.domain import KIND_FILE_WATCHER
 from stonebranch_graph.normalizers import (
     command_evidence,
     command_hash,
@@ -63,8 +64,14 @@ from stonebranch_graph.normalizers import (
     normalize_command_variable_name,
     semantic_command_hash,
 )
-from stonebranch_graph.utils import discover_source_files, first_string, is_secret_key, normalized_kind, read_json_text, safe_metadata
-
+from stonebranch_graph.utils import (
+    discover_source_files,
+    first_string,
+    is_secret_key,
+    normalized_kind,
+    read_json_text,
+    safe_metadata,
+)
 
 VAR_TOKEN_RE = re.compile(
     r"""
@@ -95,6 +102,29 @@ WORKFLOW_STRUCTURE_KEY_NAMES = {key.lower() for key in (*WORKFLOW_VERTEX_KEYS, *
 # when the export stores it in the tasks folder.
 WORKFLOW_NATIVE_TYPES = {"taskworkflow", "workflow"}
 JOB_LIKE_TARGET_KINDS = {KIND_TASK, KIND_WORKFLOW, KIND_FILE_WATCHER}
+
+
+@dataclass(frozen=True)
+class RawRecord:
+    kind: str
+    native_type: str
+    name: str
+    env: str
+    source_file: str
+    data: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _RawDependencyRecord:
+    env: str
+    source_file: str
+    data: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class StonebranchRawExport:
+    records: list[RawRecord]
+    warnings: list[str]
 
 
 TARGET_KIND_BY_NATIVE_RELATION = {
@@ -160,84 +190,75 @@ class StonebranchJsonParser:
         self.deep_scan = deep_scan
 
     def parse(self, input_path: Path) -> Graph:
-        files = self._load_json_files(input_path)
+        raw, dependency_records = self._parse_raw_with_dependencies(input_path)
         graph = Graph(source_system=SOURCE_STONEBRANCH, env=self.env)
-        records: list[tuple[Path, str, str, str, str, dict[str, Any]]] = []
-        dependency_records: list[tuple[Path, str, str, dict[str, Any]]] = []
+        for warning in raw.warnings:
+            self._append_warning_once(graph, warning)
 
-        for path, relative_path, data in files:
-            kind = self._kind_from_path(path)
-            if not kind:
-                if self._is_dependency_definition_path(path):
-                    for item_relative_path, item in self._iter_object_dicts(data, relative_path, graph):
-                        env = self._env_from_path(path) if self.env_aware else self.env
-                        dependency_records.append((path, item_relative_path, env, item))
-                    continue
+        for record in raw.records:
+            node = self._make_node(
+                env=record.env,
+                kind=record.kind,
+                name=record.name,
+                native_kind=record.native_type,
+                source_file=record.source_file,
+                metadata=self._object_metadata(record.data, record.name),
+                attributes=record.data,
+            )
+            existing = graph.nodes.get(node.id)
+            if existing and existing.source_file != record.source_file:
                 self._append_warning_once(
                     graph,
-                    f"Skipped Stonebranch JSON file outside a configured object-kind folder: {relative_path}.",
+                    f"Duplicate Stonebranch object id {node.id!r}: keeping first definition from "
+                    f"{existing.source_file!r}, merging duplicate from {record.source_file!r}.",
                 )
-                continue
-            for item_relative_path, item in self._iter_object_dicts(data, relative_path, graph):
-                env = self._env_from_path(path) if self.env_aware else self.env
-                native_kind = self._native_kind(item) or kind
-                item_kind = self._effective_kind(kind, native_kind)
-                name = self._detect_object_name(item, item_kind, path)
-                node = self._make_node(
-                    env=env,
-                    kind=item_kind,
-                    name=name,
-                    native_kind=native_kind,
-                    source_file=item_relative_path,
-                    metadata=self._object_metadata(item, name),
-                    attributes=item,
-                )
-                existing = graph.nodes.get(node.id)
-                if existing and existing.source_file != item_relative_path:
-                    self._append_warning_once(
-                        graph,
-                        f"Duplicate Stonebranch object id {node.id!r}: keeping first definition from "
-                        f"{existing.source_file!r}, merging duplicate from {item_relative_path!r}.",
-                    )
-                graph.add_node(node)
-                records.append((path, item_relative_path, env, item_kind, name, item))
-
-        if not records and not dependency_records:
-            self._append_warning_once(graph, f"No Stonebranch objects were parsed from {input_path}.")
+            graph.add_node(node)
 
         registry = self._build_registry(graph)
 
-        for path, relative_path, env, data in dependency_records:
-            edge = self._dependency_definition_edge(graph, registry, env, relative_path, data)
+        for record in dependency_records:
+            edge = self._dependency_definition_edge(
+                graph, registry, record.env, record.source_file, record.data
+            )
             if edge:
                 graph.add_edge(edge)
             else:
                 self._append_warning_once(
                     graph,
-                    f"Skipped Stonebranch dependency definition without a clear dependent/prerequisite pair: {relative_path}.",
+                    "Skipped Stonebranch dependency definition without a clear dependent/"
+                    f"prerequisite pair: {record.source_file}.",
                 )
 
-        for path, relative_path, env, source_kind, source_name, data in records:
-            source_id = make_node_id(SOURCE_STONEBRANCH, env, source_kind, source_name)
-            if source_kind == KIND_WORKFLOW:
-                self._add_workflow_structure_edges(graph, registry, env, relative_path, source_id, data)
-            for ref_value, native_relation, relation, evidence_path, evidence_key, evidence_value in self._find_references(data, source_kind):
+        for record in raw.records:
+            source_id = make_node_id(SOURCE_STONEBRANCH, record.env, record.kind, record.name)
+            if record.kind == KIND_WORKFLOW:
+                self._add_workflow_structure_edges(
+                    graph, registry, record.env, record.source_file, source_id, record.data
+                )
+            for (
+                ref_value,
+                native_relation,
+                relation,
+                evidence_path,
+                evidence_key,
+                evidence_value,
+            ) in self._find_references(record.data, record.kind):
                 target_kind = self._kind_from_relation(native_relation, relation)
                 target_id = self._resolve_or_create_ref_node(
                     graph=graph,
                     registry=registry,
-                    env=env,
+                    env=record.env,
                     target_kind=target_kind,
                     target_name=ref_value,
                     native_relation=native_relation,
-                    source_file=relative_path,
+                    source_file=record.source_file,
                 )
-                edge_source, edge_target, edge_relation, edge_native_relation = self._directed_relation(
-                    source_id,
-                    target_id,
-                    relation,
-                    native_relation,
-                )
+                (
+                    edge_source,
+                    edge_target,
+                    edge_relation,
+                    edge_native_relation,
+                ) = self._directed_relation(source_id, target_id, relation, native_relation)
                 edge = Edge(
                     id=make_edge_id(edge_source, edge_target, edge_relation, edge_native_relation),
                     source=edge_source,
@@ -245,16 +266,73 @@ class StonebranchJsonParser:
                     relation=edge_relation,
                     source_system=SOURCE_STONEBRANCH,
                     native_relation=edge_native_relation,
-                    evidence_file=relative_path,
+                    evidence_file=record.source_file,
                     evidence_path=evidence_path,
                     evidence_key=evidence_key,
-                    evidence_value=redacted_preview(evidence_value, self.config.max_evidence_value_len),
+                    evidence_value=redacted_preview(
+                        evidence_value, self.config.max_evidence_value_len
+                    ),
                     confidence=0.95 if native_relation != "deep_scan_reference" else 0.55,
                 )
                 graph.add_edge(edge)
 
         self._add_warnings(graph)
         return graph
+
+    def parse_raw(self, input_path: Path) -> StonebranchRawExport:
+        raw, _dependency_records = self._parse_raw_with_dependencies(input_path)
+        return raw
+
+    def _parse_raw_with_dependencies(
+        self, input_path: Path
+    ) -> tuple[StonebranchRawExport, list[_RawDependencyRecord]]:
+        files = self._load_json_files(input_path)
+        records: list[RawRecord] = []
+        dependency_records: list[_RawDependencyRecord] = []
+        warnings: list[str] = []
+
+        for path, relative_path, data in files:
+            kind = self._kind_from_path(path)
+            if not kind:
+                if self._is_dependency_definition_path(path):
+                    for item_relative_path, item in self._iter_object_dicts(
+                        data, relative_path, warnings
+                    ):
+                        env = self._env_from_path(path) if self.env_aware else self.env
+                        dependency_records.append(
+                            _RawDependencyRecord(env=env, source_file=item_relative_path, data=item)
+                        )
+                    continue
+                self._append_warning_once_raw(
+                    warnings,
+                    "Skipped Stonebranch JSON file outside a configured object-kind folder: "
+                    f"{relative_path}.",
+                )
+                continue
+            for item_relative_path, item in self._iter_object_dicts(
+                data, relative_path, warnings
+            ):
+                env = self._env_from_path(path) if self.env_aware else self.env
+                native_kind = self._native_kind(item) or kind
+                item_kind = self._effective_kind(kind, native_kind)
+                name = self._detect_object_name(item, item_kind, path)
+                records.append(
+                    RawRecord(
+                        kind=item_kind,
+                        native_type=native_kind,
+                        name=name,
+                        env=env,
+                        source_file=item_relative_path,
+                        data=item,
+                    )
+                )
+
+        if not records and not dependency_records:
+            self._append_warning_once_raw(
+                warnings, f"No Stonebranch objects were parsed from {input_path}."
+            )
+
+        return StonebranchRawExport(records=records, warnings=warnings), dependency_records
 
     def _load_json_files(self, input_path: Path) -> list[tuple[Path, str, Any]]:
         if not input_path.exists():
@@ -277,7 +355,9 @@ class StonebranchJsonParser:
             loaded.append((file, relative, data))
         return loaded
 
-    def _iter_object_dicts(self, data: Any, relative_path: str, graph: Graph) -> list[tuple[str, dict[str, Any]]]:
+    def _iter_object_dicts(
+        self, data: Any, relative_path: str, warnings: list[str]
+    ) -> list[tuple[str, dict[str, Any]]]:
         if isinstance(data, dict):
             return [(relative_path, data)]
         if isinstance(data, list):
@@ -286,14 +366,21 @@ class StonebranchJsonParser:
                 if isinstance(item, dict):
                     objects.append((f"{relative_path}#[{idx}]", item))
                 else:
-                    self._append_warning_once(
-                        graph,
-                        f"Skipped non-object item in Stonebranch JSON array at {relative_path}#[{idx}].",
+                    self._append_warning_once_raw(
+                        warnings,
+                        "Skipped non-object item in Stonebranch JSON array at "
+                        f"{relative_path}#[{idx}].",
                     )
             if not objects:
-                self._append_warning_once(graph, f"Skipped Stonebranch JSON array with no object items: {relative_path}.")
+                self._append_warning_once_raw(
+                    warnings,
+                    f"Skipped Stonebranch JSON array with no object items: {relative_path}.",
+                )
             return objects
-        self._append_warning_once(graph, f"Skipped unsupported Stonebranch JSON root in {relative_path}: {type(data).__name__}.")
+        self._append_warning_once_raw(
+            warnings,
+            f"Skipped unsupported Stonebranch JSON root in {relative_path}: {type(data).__name__}.",
+        )
         return []
 
 
@@ -681,7 +768,7 @@ class StonebranchJsonParser:
         return first_string(data, kind_specific_keys.get(kind, ("name", "Name", "title", "Title"))) or path.stem
 
     def _object_metadata(self, data: dict[str, Any], name: str = "") -> dict[str, Any]:
-        metadata = {"json_keys": sorted(str(k) for k in data.keys())}
+        metadata = {"json_keys": sorted(str(k) for k in data)}
         naming = enterprise_name_parts(name)
         if naming:
             metadata["enterprise_naming"] = naming
@@ -986,6 +1073,10 @@ class StonebranchJsonParser:
     def _append_warning_once(self, graph: Graph, warning: str) -> None:
         if warning not in graph.warnings:
             graph.warnings.append(warning)
+
+    def _append_warning_once_raw(self, warnings: list[str], warning: str) -> None:
+        if warning not in warnings:
+            warnings.append(warning)
 
     def _add_warnings(self, graph: Graph) -> None:
         synthetic = sum(1 for n in graph.nodes.values() if n.metadata.get("synthetic"))

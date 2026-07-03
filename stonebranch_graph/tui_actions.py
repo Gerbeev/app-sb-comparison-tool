@@ -5,16 +5,37 @@ from pathlib import Path
 from .config import AnalyzerConfig
 from .tui_settings import TuiSettings, optional_path
 from .workflows import (
+    CompareSkeletonResult,
     CompareWorkflowResult,
     GraphWorkflowResult,
     ProfileWorkflowResult,
-    build_jil_pack as run_build_jil_pack,
-    build_stonebranch_pack as run_build_stonebranch_pack,
-    compare_direct as run_compare_direct,
-    compare_graph_json as run_compare_graph_json,
-    compare_packs as run_compare_packs,
+    SkeletonWorkflowResult,
     profile_jil_schema,
     profile_stonebranch_schema,
+)
+from .workflows import (
+    build_jil_pack as run_build_jil_pack,
+)
+from .workflows import (
+    build_jil_skeleton_workflow as run_build_jil_skeleton,
+)
+from .workflows import (
+    build_stonebranch_pack as run_build_stonebranch_pack,
+)
+from .workflows import (
+    build_stonebranch_skeleton_workflow as run_build_stonebranch_skeleton,
+)
+from .workflows import (
+    compare_direct as run_compare_direct,
+)
+from .workflows import (
+    compare_graph_json as run_compare_graph_json,
+)
+from .workflows import (
+    compare_packs as run_compare_packs,
+)
+from .workflows import (
+    compare_skeleton_direct as run_compare_skeleton_direct,
 )
 
 
@@ -44,6 +65,27 @@ def build_jil_pack(settings: TuiSettings, config: AnalyzerConfig) -> GraphWorkfl
     )
 
 
+def build_stonebranch_skeleton(settings: TuiSettings, config: AnalyzerConfig) -> SkeletonWorkflowResult:
+    return run_build_stonebranch_skeleton(
+        Path(settings.stonebranch_path),
+        Path(settings.output_path) / "stonebranch-skeleton",
+        runtime_config(settings, config),
+        alias_path=optional_path(settings.mapping_path),
+        env=settings.env,
+        env_aware=settings.env_aware,
+    )
+
+
+def build_jil_skeleton(settings: TuiSettings, config: AnalyzerConfig) -> SkeletonWorkflowResult:
+    return run_build_jil_skeleton(
+        Path(settings.jil_path),
+        Path(settings.output_path) / "jil-skeleton",
+        runtime_config(settings, config),
+        alias_path=optional_path(settings.mapping_path),
+        env=settings.env,
+    )
+
+
 def compare_packs(settings: TuiSettings, config: AnalyzerConfig) -> CompareWorkflowResult:
     return run_compare_packs(
         stonebranch_pack=Path(settings.stonebranch_pack_path),
@@ -51,6 +93,18 @@ def compare_packs(settings: TuiSettings, config: AnalyzerConfig) -> CompareWorkf
         output_dir=Path(settings.compare_pack_path),
         config=config,
         mapping_path=optional_path(settings.mapping_path),
+    )
+
+
+def compare_skeleton(settings: TuiSettings, config: AnalyzerConfig) -> CompareSkeletonResult:
+    return run_compare_skeleton_direct(
+        stonebranch_path=Path(settings.stonebranch_path),
+        jil_path=Path(settings.jil_path),
+        output_dir=Path(settings.output_path) / "compare-skeleton",
+        config=runtime_config(settings, config),
+        alias_path=optional_path(settings.mapping_path),
+        env=settings.env,
+        env_aware=settings.env_aware,
     )
 
 

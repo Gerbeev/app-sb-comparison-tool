@@ -1,0 +1,5 @@
+{
+  "name": "build_report",
+  "type": "Universal Task",
+  "command": "/app/build_report.sh"
+}

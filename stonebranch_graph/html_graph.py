@@ -6,6 +6,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from . import expr as trigger_expr
 from .core import Graph, Node
 from .domain import (
     CALENDAR_RELATIONS,
@@ -28,10 +29,14 @@ from .exporters import (
     write_text_file,
 )
 from .graph_utils import GraphTraversalCache
+from .skeleton import KIND_CONTAINER, KIND_UNIT, Skeleton, SkeletonNode, depends_on_view
 
 HTML_GRAPH_SCHEMA_VERSION = "1.0"
 CYTOSCAPE_RUNTIME_FILE = "cytoscape.min.js"
 CYTOSCAPE_LICENSE_FILE = "cytoscape.LICENSE"
+SKELETON_TRIGGER_INLINE_NODE_THRESHOLD = 4_000
+"""Above this node count, omit pure SUCCESS-AND trigger strings from skeleton HTML payloads."""
+SKELETON_DIFF_HTML_MAX_EDGES = 800
 
 CONTAINER_KINDS = {KIND_WORKFLOW, KIND_BOX}
 
@@ -275,6 +280,453 @@ def export_cytoscape_html_report(
     traversal = traversal or GraphTraversalCache.build(graph)
     export_graph_data_js(graph, output_dir / "graph-data.js", traversal=traversal)
     export_graph_html(output_dir / "graph.html")
+
+
+def build_skeleton_graph_data(skeleton: Skeleton) -> dict[str, Any]:
+    """Build the Cytoscape view-model for canonical skeleton trigger semantics."""
+
+    depends_on = depends_on_view(skeleton)
+    erased_counts = _plumbing_erased_counts(skeleton)
+    include_pure_success_triggers = (
+        len(skeleton.nodes) <= SKELETON_TRIGGER_INLINE_NODE_THRESHOLD
+    )
+    nodes = [
+        _skeleton_node_payload(
+            node,
+            depends_on,
+            erased_counts,
+            include_pure_success_triggers=include_pure_success_triggers,
+        )
+        for node in _sorted_skeleton_nodes(skeleton)
+    ]
+    nodes_by_id = {str(node["id"]): node for node in nodes}
+    edges: list[dict[str, Any]] = []
+    seen_edge_ids: set[str] = set()
+
+    for node in _sorted_skeleton_nodes(skeleton):
+        if node.trigger is None:
+            continue
+        for atom, or_group in _atoms_with_or_groups(node.trigger):
+            if atom.node_ref not in nodes_by_id:
+                stub = _external_stub_payload(atom.node_ref)
+                nodes_by_id[atom.node_ref] = stub
+                nodes.append(stub)
+            edges.append(_skeleton_edge_payload(atom, node.id, or_group, seen_edge_ids))
+
+    nodes = sorted(nodes, key=lambda item: (bool(item.get("external")), str(item["id"])))
+    groups, jobs = _skeleton_groups_and_jobs(nodes)
+    category_counts = _category_counts(edges)
+
+    return {
+        "schema_version": HTML_GRAPH_SCHEMA_VERSION,
+        "metadata": {
+            "report_type": "skeleton",
+            "report_title": "Skeleton graph",
+            "nodes": len(nodes),
+            "skeleton_nodes": len(skeleton.nodes),
+            "external_stubs": len([node for node in nodes if node.get("external")]),
+            "edges": len(edges),
+            "groups": len(groups),
+            "jobs": len(jobs),
+            "warnings": len(skeleton.warnings),
+            "relation_categories": dict(sorted(category_counts.items())),
+            "trigger_inline_node_threshold": SKELETON_TRIGGER_INLINE_NODE_THRESHOLD,
+            "pure_success_triggers_elided": not include_pure_success_triggers,
+        },
+        "nodes": nodes,
+        "groups": groups,
+        "jobs": jobs,
+        "edges": sorted(
+            edges,
+            key=lambda item: (item["source"], item["predicate"], item["target"], item["id"]),
+        ),
+        "warnings": sorted(str(warning) for warning in skeleton.warnings),
+    }
+
+
+def export_skeleton_graph_data_js(skeleton: Skeleton, path: Path) -> None:
+    payload = build_skeleton_graph_data(skeleton)
+    text = _graph_data_js(payload, "offline skeleton graph data")
+    write_text_file(path, text)
+
+
+def export_skeleton_html_report(skeleton: Skeleton, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    export_skeleton_graph_data_js(skeleton, output_dir / "skeleton-graph-data.js")
+    export_graph_html(
+        output_dir / "skeleton-graph.html",
+        data_file="skeleton-graph-data.js",
+        title="Skeleton graph",
+    )
+
+
+def build_skeleton_comparison_graph_data(
+    diff_json_path_or_dict: str | Path | dict[str, Any] | Any,
+    sb_skeleton: Skeleton,
+    jil_skeleton: Skeleton,
+) -> dict[str, Any]:
+    """Build the union skeleton diff graph view-model."""
+
+    diff = _diff_payload(diff_json_path_or_dict)
+    statuses = _skeleton_diff_statuses(diff)
+    sb_payload = build_skeleton_graph_data(sb_skeleton)
+    jil_payload = build_skeleton_graph_data(jil_skeleton)
+    sb_nodes = {str(node["id"]): node for node in sb_payload["nodes"]}
+    jil_nodes = {str(node["id"]): node for node in jil_payload["nodes"]}
+
+    nodes: list[dict[str, Any]] = []
+    for node_id in sorted(set(sb_nodes) | set(jil_nodes)):
+        side = _node_side(node_id, sb_nodes, jil_nodes)
+        base = dict(sb_nodes.get(node_id) or jil_nodes[node_id])
+        status_by_level = statuses.get(node_id, _matched_statuses())
+        base["status_by_level"] = status_by_level
+        base["status"] = status_by_level["logic"]
+        base["side"] = side
+        base["sb_trigger"] = sb_nodes.get(node_id, {}).get("trigger")
+        base["jil_trigger"] = jil_nodes.get(node_id, {}).get("trigger")
+        base["diff_reasons"] = _diff_reasons(diff, node_id)
+        nodes.append(base)
+
+    node_ids = {str(node["id"]) for node in nodes}
+    edges = _comparison_edges(sb_payload, jil_payload, statuses, node_ids)
+    total_edges_before_cap = len(edges)
+    edges_capped = total_edges_before_cap > SKELETON_DIFF_HTML_MAX_EDGES
+    if edges_capped:
+        edges = edges[:SKELETON_DIFF_HTML_MAX_EDGES]
+    groups, jobs = _skeleton_groups_and_jobs(nodes)
+    status_counts = _status_counts(nodes, level="logic")
+    statuses_by_level = {
+        level: _status_counts(nodes, level=level) for level in ("topology", "logic", "strict")
+    }
+
+    return {
+        "schema_version": HTML_GRAPH_SCHEMA_VERSION,
+        "metadata": {
+            "report_type": "skeleton_comparison",
+            "report_title": "Skeleton comparison graph",
+            "strictness_level": "logic",
+            "strictness_levels": ["topology", "logic", "strict"],
+            "nodes": len(nodes),
+            "edges": len(edges),
+            "groups": len(groups),
+            "jobs": len(jobs),
+            "relation_categories": dict(sorted(_category_counts(edges).items())),
+            "total_edges_before_cap": total_edges_before_cap,
+            "edge_cap": SKELETON_DIFF_HTML_MAX_EDGES,
+            "edges_capped": edges_capped,
+            "statuses": dict(sorted(status_counts.items())),
+            "statuses_by_level": {
+                level: dict(sorted(counts.items())) for level, counts in statuses_by_level.items()
+            },
+        },
+        "nodes": nodes,
+        "groups": groups,
+        "jobs": jobs,
+        "edges": edges,
+        "warnings": sorted({*sb_skeleton.warnings, *jil_skeleton.warnings}),
+    }
+
+
+def export_skeleton_comparison_graph_data_js(
+    diff_json_path_or_dict: str | Path | dict[str, Any] | Any,
+    sb_skeleton: Skeleton,
+    jil_skeleton: Skeleton,
+    path: Path,
+) -> None:
+    payload = build_skeleton_comparison_graph_data(
+        diff_json_path_or_dict,
+        sb_skeleton,
+        jil_skeleton,
+    )
+    text = _graph_data_js(payload, "offline skeleton comparison graph data")
+    write_text_file(path, text)
+
+
+def export_skeleton_comparison_html(
+    diff_json_path_or_dict: str | Path | dict[str, Any] | Any,
+    sb_skeleton: Skeleton,
+    jil_skeleton: Skeleton,
+    output_dir: Path,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    export_skeleton_comparison_graph_data_js(
+        diff_json_path_or_dict,
+        sb_skeleton,
+        jil_skeleton,
+        output_dir / "skeleton-compare-graph-data.js",
+    )
+    export_graph_html(
+        output_dir / "skeleton-compare-graph.html",
+        data_file="skeleton-compare-graph-data.js",
+        title="Skeleton comparison graph",
+    )
+
+
+def _graph_data_js(payload: dict[str, Any], description: str) -> str:
+    return (
+        f"/* {description}. Generated by stonebranch-dependency-tool; do not hand-edit. */\n"
+        "window.GRAPH_DATA = "
+        + json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True)
+        + ";\n"
+    )
+
+
+def _sorted_skeleton_nodes(skeleton: Skeleton) -> list[SkeletonNode]:
+    return [skeleton.nodes[node_id] for node_id in sorted(skeleton.nodes)]
+
+
+def _skeleton_node_payload(
+    node: SkeletonNode,
+    depends_on: dict[str, list[str]],
+    erased_counts: dict[str, int],
+    *,
+    include_pure_success_triggers: bool,
+) -> dict[str, Any]:
+    meta = _skeleton_meta(node)
+    trigger = _skeleton_trigger_payload(
+        node,
+        depends_on,
+        include_pure_success_triggers=include_pure_success_triggers,
+    )
+    payload: dict[str, Any] = {
+        "id": node.id,
+        "key": node.id,
+        "label": _leaf_label(node.id),
+        "name": _leaf_label(node.id),
+        "kind": node.kind,
+        "parent": node.parent,
+        "group": node.parent if node.kind == KIND_UNIT else None,
+        "trigger": trigger,
+        "depends_on": depends_on.get(node.id, []),
+        "meta": meta,
+        "source_file": _html_path(str(meta.get("src") or "")),
+        "native": meta.get("native"),
+    }
+    if erased_counts.get(node.id):
+        payload["plumbing_erased_count"] = erased_counts[node.id]
+    return payload
+
+
+def _skeleton_trigger_payload(
+    node: SkeletonNode,
+    depends_on: dict[str, list[str]],
+    *,
+    include_pure_success_triggers: bool,
+) -> str | None:
+    if node.trigger is None:
+        return None
+    if not include_pure_success_triggers and node.id in depends_on:
+        return None
+    return trigger_expr.render(node.trigger)
+
+
+def _external_stub_payload(node_id: str) -> dict[str, Any]:
+    return {
+        "id": node_id,
+        "key": node_id,
+        "label": _leaf_label(node_id),
+        "name": _leaf_label(node_id),
+        "kind": KIND_UNIT,
+        "parent": None,
+        "group": None,
+        "trigger": None,
+        "depends_on": [],
+        "external": True,
+        "meta": {"src": None, "native": node_id},
+        "source_file": "",
+        "native": node_id,
+    }
+
+
+def _skeleton_meta(node: SkeletonNode) -> dict[str, Any]:
+    src = node.meta.get("src") or node.meta.get("source_file")
+    native = node.meta.get("native") or node.meta.get("name") or node.meta.get("type")
+    meta = {"src": src, "native": native}
+    for key, value in stable_value(node.meta).items():
+        meta.setdefault(str(key), value)
+    return meta
+
+
+def _leaf_label(node_id: str) -> str:
+    return node_id.rsplit("/", 1)[-1]
+
+
+def _plumbing_erased_counts(skeleton: Skeleton) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for erasure in skeleton.erasures:
+        for node_id in erasure.get("replaced_in", []):
+            counts[str(node_id)] += 1
+    return counts
+
+
+def _atoms_with_or_groups(expr: trigger_expr.Expr) -> list[tuple[trigger_expr.Atom, int | None]]:
+    result: list[tuple[trigger_expr.Atom, int | None]] = []
+    next_group = 0
+
+    def visit(current: trigger_expr.Expr, current_group: int | None) -> None:
+        nonlocal next_group
+        if isinstance(current, trigger_expr.Atom):
+            result.append((current, current_group))
+            return
+        if isinstance(current, trigger_expr.Not):
+            visit(current.child, current_group)
+            return
+        if isinstance(current, trigger_expr.Or):
+            group = current_group
+            if group is None:
+                group = next_group
+                next_group += 1
+            for child in current.children:
+                visit(child, group)
+            return
+        for child in current.children:
+            visit(child, current_group)
+
+    visit(trigger_expr.canonicalize(expr), None)
+    return result
+
+
+def _skeleton_edge_payload(
+    atom: trigger_expr.Atom,
+    target_id: str,
+    or_group: int | None,
+    seen_edge_ids: set[str],
+) -> dict[str, Any]:
+    base_id = f"{atom.node_ref}|{atom.predicate}|{target_id}"
+    edge_id = base_id
+    if edge_id in seen_edge_ids:
+        suffix = atom.qualifier or (str(or_group) if or_group is not None else "duplicate")
+        edge_id = f"{base_id}|{suffix}"
+    counter = 2
+    while edge_id in seen_edge_ids:
+        edge_id = f"{base_id}|{counter}"
+        counter += 1
+    seen_edge_ids.add(edge_id)
+    label = atom.predicate if not atom.qualifier else f"{atom.predicate}[{atom.qualifier}]"
+    return {
+        "id": edge_id,
+        "source": atom.node_ref,
+        "target": target_id,
+        "predicate": atom.predicate,
+        "qualifier": atom.qualifier,
+        "or_group": or_group,
+        "label": label,
+        "relation": atom.predicate,
+        "category": "dependencies",
+    }
+
+
+def _skeleton_groups_and_jobs(
+    nodes: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    groups = [dict(node, type="group") for node in nodes if node.get("kind") == KIND_CONTAINER]
+    jobs = [dict(node, type="job") for node in nodes if node.get("kind") != KIND_CONTAINER]
+    return (
+        sorted(groups, key=lambda item: (str(item.get("parent") or ""), str(item["id"]))),
+        sorted(jobs, key=lambda item: (str(item.get("group") or ""), str(item["id"]))),
+    )
+
+
+def _category_counts(edges: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for edge in edges:
+        counts[str(edge.get("category") or "other")] += 1
+    return counts
+
+
+def _diff_payload(diff_json_path_or_dict: str | Path | dict[str, Any] | Any) -> dict[str, Any]:
+    if isinstance(diff_json_path_or_dict, dict):
+        return diff_json_path_or_dict
+    if hasattr(diff_json_path_or_dict, "to_dict"):
+        return diff_json_path_or_dict.to_dict()
+    path = Path(diff_json_path_or_dict)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _skeleton_diff_statuses(diff: dict[str, Any]) -> dict[str, dict[str, str]]:
+    result: dict[str, dict[str, str]] = {}
+    for entry in diff.get("nodes", []):
+        node_id = str(entry.get("id") or "")
+        if not node_id:
+            continue
+        raw = entry.get("status_by_level") or {}
+        result[node_id] = {
+            level: _display_skeleton_status(str(raw.get(level) or "matched"))
+            for level in ("topology", "logic", "strict")
+        }
+    return result
+
+
+def _display_skeleton_status(status: str) -> str:
+    return {
+        "only_in_stonebranch": "only-sb",
+        "only_in_jil": "only-jil",
+    }.get(status, status)
+
+
+def _matched_statuses() -> dict[str, str]:
+    return {"topology": "matched", "logic": "matched", "strict": "matched"}
+
+
+def _node_side(
+    node_id: str,
+    sb_nodes: dict[str, dict[str, Any]],
+    jil_nodes: dict[str, dict[str, Any]],
+) -> str:
+    if node_id in sb_nodes and node_id in jil_nodes:
+        return "both"
+    if node_id in sb_nodes:
+        return "stonebranch"
+    return "jil"
+
+
+def _diff_reasons(diff: dict[str, Any], node_id: str) -> list[str]:
+    for entry in diff.get("nodes", []):
+        if entry.get("id") == node_id:
+            return list(entry.get("reasons") or [])
+    return []
+
+
+def _comparison_edges(
+    sb_payload: dict[str, Any],
+    jil_payload: dict[str, Any],
+    statuses: dict[str, dict[str, str]],
+    node_ids: set[str],
+) -> list[dict[str, Any]]:
+    edges: dict[str, dict[str, Any]] = {}
+
+    def add(edge: dict[str, Any], side: str) -> None:
+        if edge["source"] not in node_ids or edge["target"] not in node_ids:
+            return
+        target_status = statuses.get(edge["target"], _matched_statuses())["logic"]
+        payload = dict(edge)
+        payload["side"] = side
+        payload["status"] = target_status
+        payload["id"] = f"{side}|{edge['id']}"
+        edges[payload["id"]] = payload
+
+    for edge in sb_payload["edges"]:
+        if statuses.get(edge["target"], _matched_statuses())["logic"] != "only-jil":
+            add(edge, "stonebranch")
+
+    # Changed nodes intentionally keep Stonebranch edges; the details panel shows
+    # both trigger strings, which is enough for prompt-08 without JS diff overlays.
+    for edge in jil_payload["edges"]:
+        if statuses.get(edge["target"], _matched_statuses())["logic"] == "only-jil":
+            add(edge, "jil")
+
+    return sorted(
+        edges.values(),
+        key=lambda item: (item["side"], item["source"], item["predicate"], item["target"]),
+    )
+
+
+def _status_counts(nodes: list[dict[str, Any]], *, level: str) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for node in nodes:
+        status_by_level = node.get("status_by_level") or _matched_statuses()
+        counts[str(status_by_level.get(level) or "matched")] += 1
+    return counts
 
 
 def comparison_node_statuses(comparison: Any) -> dict[str, str]:
@@ -577,6 +1029,11 @@ CYTOSCAPE_HTML = r'''<!doctype html>
     <option value="semantic">Semantic mismatch</option>
     <option value="collisions">Collisions</option>
   </select>
+  <select id="levelFilter" title="Skeleton diff level">
+    <option value="topology">Topology</option>
+    <option value="logic" selected>Logic</option>
+    <option value="strict">Strict</option>
+  </select>
   <button id="showProblems">Problems</button>
   <button id="showCritical">Critical</button>
   <button id="showMissing">Missing</button>
@@ -611,10 +1068,13 @@ CYTOSCAPE_HTML = r'''<!doctype html>
 const DATA = window.GRAPH_DATA || {metadata:{}, groups:[], jobs:[], edges:[], warnings:[]};
 const $ = id => document.getElementById(id);
 const hasComparisonStatuses = !!(DATA.metadata && DATA.metadata.statuses && Object.keys(DATA.metadata.statuses).length);
+const isSkeletonReport = ['skeleton','skeleton_comparison'].includes(DATA.metadata?.report_type);
+const hasStrictnessLevels = !!(DATA.metadata?.strictness_levels || []).length;
 const quickFilters = ['showProblems', 'showCritical', 'showMissing', 'showAll'];
 if(!hasComparisonStatuses){
   for(const id of ['showProblems', 'showCritical', 'showMissing']) $(id).style.display = 'none';
 }
+if(!hasStrictnessLevels) $('levelFilter').style.display = 'none';
 if(typeof window.cytoscape !== 'function'){
   $('runtimeError').style.display = 'block';
   $('runtimeError').textContent = 'Cytoscape.js runtime was not loaded. Keep cytoscape.min.js next to this HTML file.';
@@ -624,11 +1084,22 @@ if(typeof window.cytoscape !== 'function'){
 let expanded = false;
 let direction = 'LR';
 let activeStatusFilter = 'all';
+let activeStrictnessLevel = DATA.metadata?.strictness_level || 'logic';
 let visibleCategories = new Set(['all']);
 let selectedId = null;
 let highlighted = new Set();
 let faded = new Set();
 let cy = null;
+
+function applyStrictnessStatuses(level){
+  activeStrictnessLevel = level;
+  for(const item of [...(DATA.groups || []), ...(DATA.jobs || []), ...(DATA.nodes || [])]){
+    if(item.status_by_level) item.status = item.status_by_level[level] || item.status;
+  }
+  if(DATA.metadata?.statuses_by_level?.[level]) DATA.metadata.statuses = DATA.metadata.statuses_by_level[level];
+}
+applyStrictnessStatuses(activeStrictnessLevel);
+$('levelFilter').value = activeStrictnessLevel;
 
 const groupById = Object.fromEntries((DATA.groups || []).map(g => [g.id, g]));
 const jobById = Object.fromEntries((DATA.jobs || []).map(j => [j.id, j]));
@@ -649,12 +1120,14 @@ function text(value, max=28){
   return s.length > max ? s.slice(0, max - 1) + '...' : s;
 }
 function kindColor(kind){
-  return {task:'#1c7ed6', box:'#7048e8', workflow:'#7048e8', agent:'#2f9e44', calendar:'#e8590c', command:'#495057', script:'#495057', file_watcher:'#1098ad', file:'#1098ad', variable:'#d6336c'}[kind] || '#868e96';
+  return {unit:'#1c7ed6', container:'#7048e8', task:'#1c7ed6', box:'#7048e8', workflow:'#7048e8', agent:'#2f9e44', calendar:'#e8590c', command:'#495057', script:'#495057', file_watcher:'#1098ad', file:'#1098ad', variable:'#d6336c'}[kind] || '#868e96';
 }
 function statusColor(status){
+  if(isSkeletonReport) return {matched:'#64748b', changed:'#f08c00', 'only-sb':'#2f9e44', 'only-jil':'#e03131'}[status] || null;
   return {matched:'#2f9e44', missing_in_stonebranch:'#e03131', missing_in_jil:'#1c7ed6', missing_critical_in_stonebranch:'#c92a2a', missing_critical_in_jil:'#364fc7', command_syntax_diff_only:'#f08c00', command_semantic_mismatch:'#c92a2a', condition_mismatch:'#f08c00', normalized_key_collision:'#862e9c', stonebranch_only:'#1c7ed6', jil_only:'#e03131'}[status] || null;
 }
-function edgeColor(cat, status){
+function edgeColor(cat, status, predicate){
+  if(isSkeletonReport && predicate && predicate !== 'SUCCESS') return '#be123c';
   return statusColor(status) || {dependencies:'#e03131', contains:'#7048e8', triggers:'#f08c00', runtime:'#2f9e44', calendars:'#e8590c', commands:'#495057', variables:'#d6336c', files:'#1098ad'}[cat] || '#868e96';
 }
 function isProblemStatus(status){
@@ -663,7 +1136,7 @@ function isProblemStatus(status){
 function statusMatches(status, filter=activeStatusFilter){
   if(filter === 'all') return true;
   if(filter === 'problems') return isProblemStatus(status);
-  if(filter === 'missing') return ['missing_in_stonebranch','missing_in_jil','missing_critical_in_stonebranch','missing_critical_in_jil'].includes(status);
+  if(filter === 'missing') return ['missing_in_stonebranch','missing_in_jil','missing_critical_in_stonebranch','missing_critical_in_jil','only-sb','only-jil'].includes(status);
   if(filter === 'critical') return ['missing_critical_in_stonebranch','missing_critical_in_jil','command_semantic_mismatch','normalized_key_collision'].includes(status);
   if(filter === 'commands') return ['command_syntax_diff_only','command_semantic_mismatch'].includes(status);
   if(filter === 'syntax') return status === 'command_syntax_diff_only';
@@ -708,7 +1181,7 @@ function visibleEdges(){
   return (DATA.edges || []).filter(e => {
     if(!nodes.has(e.source) || !nodes.has(e.target)) return false;
     if(activeStatusFilter !== 'all' && e.status && !statusMatches(e.status) && !statusMatches(nodeById[e.source]?.status) && !statusMatches(nodeById[e.target]?.status)) return false;
-    if(!expanded && (DATA.groups || []).length && e.category !== 'contains') return false;
+    if(!expanded && (DATA.groups || []).length && e.category !== 'contains' && !isSkeletonReport) return false;
     if(visibleCategories.has('all')) return true;
     return visibleCategories.has(e.category);
   });
@@ -764,12 +1237,12 @@ function toCytoscapeElements(){
     };
     const parent = expanded ? (n.parent || n.group) : null;
     if(parent && nodeIds.has(parent)) data.parent = parent;
-    return {group:'nodes', data, classes:`${n.type} ${isProblemStatus(n.status) ? 'problem' : ''}`};
+    return {group:'nodes', data, classes:`${n.type} ${n.external ? 'external' : ''} ${isProblemStatus(n.status) ? 'problem' : ''}`};
   });
   const cyEdges = edges.map(e => ({
     group:'edges',
-    data:{...e, label:text(e.relation, 24), color:edgeColor(e.category, e.status)},
-    classes:`${e.category || 'other'} ${isProblemStatus(e.status) ? 'problem' : ''}`
+    data:{...e, label:text((e.predicate === 'SUCCESS' && !e.qualifier) ? '' : (e.label || e.relation), 24), color:edgeColor(e.category, e.status, e.predicate)},
+    classes:`${e.category || 'other'} ${e.or_group !== null && e.or_group !== undefined ? 'or-group' : ''} ${e.predicate && e.predicate !== 'SUCCESS' ? 'non-success' : ''} ${isProblemStatus(e.status) ? 'problem' : ''}`
   }));
   return {nodes, edges, elements:[...cyNodes, ...cyEdges]};
 }
@@ -797,8 +1270,11 @@ function buildCy(){
       {selector:'node', style:{'background-color':'data(color)','border-color':'data(borderColor)','border-width':2,'label':'data(label)','color':'#fff','font-size':11,'font-weight':700,'text-valign':'center','text-halign':'center','text-wrap':'wrap','text-max-width':112,'text-outline-color':'data(color)','text-outline-width':2}},
       {selector:'node.group', style:{'shape':'round-rectangle','width':128,'height':58,'background-opacity':0.9,'padding':'18px','text-max-width':116}},
       {selector:'node.job', style:{'shape':'ellipse','width':54,'height':54,'text-max-width':70}},
+      {selector:'node.external', style:{'background-opacity':0.22,'border-style':'dotted','border-color':'#94a3b8','color':'#475569','text-outline-width':0}},
       {selector:':parent', style:{'background-opacity':0.12,'border-width':2,'border-style':'dashed','text-valign':'top','text-margin-y':-6,'color':'#334155','text-outline-width':0}},
       {selector:'edge', style:{'width':2,'line-color':'data(color)','target-arrow-color':'data(color)','target-arrow-shape':'triangle','curve-style':'bezier','label':'data(label)','font-size':9,'color':'#475569','text-background-color':'#fff','text-background-opacity':0.75,'text-background-padding':2,'text-rotation':'autorotate'}},
+      {selector:'edge.non-success', style:{'width':3,'color':'#991b1b','font-weight':700}},
+      {selector:'edge.or-group', style:{'line-style':'dashed'}},
       {selector:'.highlight', style:{'z-index':999,'border-width':5,'width':4,'opacity':1}},
       {selector:'.faded', style:{'opacity':0.16}},
       {selector:':selected', style:{'border-color':'#111827','border-width':4,'line-color':'#111827','target-arrow-color':'#111827'}}
@@ -835,9 +1311,10 @@ function fit(){
   updateCounts();
   if(cy) cy.fit(undefined, 45);
 }
-function edgeLabel(e){ return `${e.source} -> ${e.relation} -> ${e.target}`; }
+function edgeLabel(e){ return `${e.source} -> ${e.relation || e.predicate} -> ${e.target}`; }
 function evidenceSummary(e){
-  return [e.status, e.category, e.evidence_file, e.evidence_key, e.evidence_path].filter(Boolean).join(' | ');
+  const orText = e.or_group !== null && e.or_group !== undefined ? `any of ${e.or_group}` : '';
+  return [e.status, e.side, e.category, e.predicate, e.qualifier, orText, e.evidence_file, e.evidence_key, e.evidence_path].filter(Boolean).join(' | ');
 }
 function bindPanelActions(){
   $('pBody').querySelectorAll('[data-node]').forEach(el => el.addEventListener('click', ev => { ev.stopPropagation(); const target=el.getAttribute('data-node'); if(target) selectNode(target); }));
@@ -879,7 +1356,7 @@ function clickableEdgeList(title, edges){
   return `<div class="section">${title} <span class="pill">${edges.length}</span></div>` + (edges.length ? edges.slice(0,80).map(e => {
     const other = e.source === currentNode ? e.target : e.source;
     const arrow = e.source === currentNode ? '->' : '<-';
-    return `<div class="edge-card"><div class="edge-main" data-edge="${escapeHtml(e.id)}"><span>${escapeHtml(e.relation)}</span><span>${arrow}</span><b>${escapeHtml(other)}</b></div><div class="edge-meta">${escapeHtml(evidenceSummary(e))}</div><div class="copy-row">${copyButton(edgeLabel(e), 'Copy edge')}<button class="copy-btn" data-node="${escapeHtml(other)}">Open node</button></div></div>`;
+    return `<div class="edge-card"><div class="edge-main" data-edge="${escapeHtml(e.id)}"><span>${escapeHtml(e.label || e.relation || e.predicate)}</span><span>${arrow}</span><b>${escapeHtml(other)}</b></div><div class="edge-meta">${escapeHtml(evidenceSummary(e))}</div><div class="copy-row">${copyButton(edgeLabel(e), 'Copy edge')}<button class="copy-btn" data-node="${escapeHtml(other)}">Open node</button></div></div>`;
   }).join('') : '<div class="placeholder">None</div>');
 }
 function showNode(id){
@@ -892,13 +1369,16 @@ function showNode(id){
     `<div class="section">Identity</div><div class="copy-row">${copyable(id)} ${copyButton(id, 'Copy ID')}</div>` +
     `${node.graph_id ? `<div class="copy-row">${copyable(node.graph_id)} ${copyButton(node.graph_id, 'Copy graph ID')}</div>` : ''}` +
     `<div class="section">Details</div>` +
-    `${metaRows({status:node.status, side:node.side, kind:node.kind, original_kind:node.original_kind, group:node.group, parent:node.parent, canonical_key:node.canonical_key, source_file:node.source_file, synthetic:node.synthetic})}` +
+    `${metaRows({status:node.status, side:node.side, kind:node.kind, original_kind:node.original_kind, group:node.group, parent:node.parent, canonical_key:node.canonical_key, source_file:node.source_file, synthetic:node.synthetic, external:node.external, plumbing_erased_count:node.plumbing_erased_count})}` +
+    `${node.trigger ? `<div class="section">Trigger</div><div class="copy-row">${copyable(node.trigger)} ${copyButton(node.trigger, 'Copy trigger')}</div>` : ''}` +
+    `${node.status === 'changed' ? `<div class="section">Trigger diff</div>${metaRows({stonebranch:node.sb_trigger, jil:node.jil_trigger, reasons:(node.diff_reasons || []).join(', ')})}` : ''}` +
+    `${node.meta ? `<div class="section">Meta</div>${metaRows(node.meta)}` : ''}` +
     `${clickableEdgeList('Outgoing', outgoing)}${clickableEdgeList('Incoming', incoming)}`;
   bindPanelActions();
 }
 function showEdge(edgeId){
   const e = edgeById[edgeId]; if(!e) return;
-  $('pTitle').textContent = e.relation || 'Edge';
+  $('pTitle').textContent = e.label || e.relation || e.predicate || 'Edge';
   $('pSub').textContent = `${e.source} -> ${e.target}`;
   $('pBody').innerHTML =
     `<div class="section">Edge identity</div><div class="copy-row">${copyable(edgeLabel(e))} ${copyButton(edgeLabel(e), 'Copy edge')}</div>` +
@@ -907,7 +1387,7 @@ function showEdge(edgeId){
     `<div class="kv"><span>Source</span><span><span class="linkish" data-node="${escapeHtml(e.source)}">${escapeHtml(e.source)}</span></span></div>` +
     `<div class="kv"><span>Target</span><span><span class="linkish" data-node="${escapeHtml(e.target)}">${escapeHtml(e.target)}</span></span></div>` +
     `<div class="section">Evidence</div>` +
-    `${metaRows({status:e.status, side:e.side, relation:e.relation, category:e.category, native_relation:e.native_relation, confidence:e.confidence, evidence_file:e.evidence_file, evidence_path:e.evidence_path, evidence_key:e.evidence_key, evidence_value:e.evidence_value})}`;
+    `${metaRows({status:e.status, side:e.side, relation:e.relation, category:e.category, predicate:e.predicate, qualifier:e.qualifier, or_group:e.or_group, native_relation:e.native_relation, confidence:e.confidence, evidence_file:e.evidence_file, evidence_path:e.evidence_path, evidence_key:e.evidence_key, evidence_value:e.evidence_value})}`;
   bindPanelActions();
 }
 function selectNode(id){
@@ -987,6 +1467,11 @@ $('collapse').onclick = () => { expanded = false; clearSelection(); relayout(); 
 $('dir').onclick = () => {
   direction = direction === 'LR' ? 'TB' : 'LR';
   $('dir').textContent = `Direction: ${direction}`;
+  relayout();
+};
+$('levelFilter').onchange = e => {
+  applyStrictnessStatuses(e.target.value);
+  clearSelection();
   relayout();
 };
 $('statusFilter').onchange = e => setStatusFilter(e.target.value);

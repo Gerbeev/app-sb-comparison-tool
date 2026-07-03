@@ -1,0 +1,5 @@
+{
+  "name": "extract",
+  "type": "Universal Task",
+  "command": "/app/extract.sh"
+}

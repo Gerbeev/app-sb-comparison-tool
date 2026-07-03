@@ -1,23 +1,24 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import re
 import shlex
 from typing import Any
 
+from stonebranch_graph import expr
 from stonebranch_graph.config import AnalyzerConfig
 from stonebranch_graph.core import (
     Edge,
     Graph,
     Node,
+    comparison_name,
+    enterprise_name_parts,
     make_canonical_key,
     make_edge_id,
     make_node_id,
     redacted_preview,
     stable_hash,
-    enterprise_name_parts,
-    comparison_name,
 )
 from stonebranch_graph.domain import (
     KIND_AGENT,
@@ -43,16 +44,42 @@ from stonebranch_graph.domain import (
     REL_WATCHES_FILE,
     SOURCE_AUTOSYS_JIL,
 )
-from stonebranch_graph.normalizers import command_evidence, command_hash, command_normalization_diagnostics, command_variable_names, condition_hash, normalize_command, semantic_command_hash
-from stonebranch_graph.utils import discover_source_files, is_secret_key, normalized_kind, read_text_file, safe_metadata
+from stonebranch_graph.jil_condition import (
+    JilConditionError,
+    ParsedJilCondition,
+    parse_jil_condition_details,
+)
+from stonebranch_graph.normalizers import (
+    command_evidence,
+    command_hash,
+    command_normalization_diagnostics,
+    command_variable_names,
+    condition_hash,
+    normalize_command,
+    semantic_command_hash,
+)
+from stonebranch_graph.skeleton import logical_leaf
+from stonebranch_graph.utils import (
+    discover_source_files,
+    is_secret_key,
+    normalized_kind,
+    read_text_file,
+    safe_metadata,
+)
 
 
-JOB_START_RE = re.compile(r"^\s*(insert_job|update_job)\s*:\s*(?P<body>.+?)\s*$", re.IGNORECASE)
+JOB_START_RE = re.compile(
+    r"^\s*(insert_job|update_job)\s*:\s*(?P<body>.+?)\s*$", re.IGNORECASE
+)
 DELETE_JOB_RE = re.compile(r"^\s*delete_job\s*:\s*(?P<name>.+?)\s*$", re.IGNORECASE)
-ATTR_RE = re.compile(r"^\s*(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(?P<value>.*?)\s*$", re.IGNORECASE)
+ATTR_RE = re.compile(
+    r"^\s*(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(?P<value>.*?)\s*$",
+    re.IGNORECASE,
+)
 
 CONDITION_RE = re.compile(
-    r"\b(?P<event>s|success|d|done|f|failure|t|terminated|n|notrunning)\s*\(\s*(?P<body>[^)]+?)\s*\)",
+    r"\b(?P<event>s|success|d|done|f|failure|t|terminated|n|notrunning)"
+    r"\s*\(\s*(?P<body>[^)]+?)\s*\)",
     re.IGNORECASE,
 )
 
@@ -68,25 +95,41 @@ class JilJob:
     start_line: int
 
 
+@dataclass
+class _JilNodeRegistry:
+    by_exact_id: dict[str, Node] = field(default_factory=dict)
+    by_canonical_key: dict[tuple[str, str], list[Node]] = field(default_factory=dict)
+    by_key_any_jobkind: dict[str, list[Node]] = field(default_factory=dict)
+
+
 class AutosysJilParser:
     def __init__(self, config: AnalyzerConfig, env: str = "default") -> None:
         self.config = config
         self.env = env
         self._job_counts_by_source_file: dict[str, int] = {}
+        self._raw_deleted_jobs: list[str] = []
+        self._raw_parse_warnings: list[str] = []
 
-    def parse(self, input_path: Path) -> Graph:
+    def parse_raw(self, input_path: Path) -> list[JilJob]:
         files = self._load_jil_files(input_path)
         jobs: list[JilJob] = []
         deleted: list[str] = []
         warnings: list[str] = []
-        for file, relative, text in files:
+        for _, relative, text in files:
             parsed, deleted_jobs, parse_warnings = self._parse_file(relative, text)
             jobs.extend(parsed)
             deleted.extend(deleted_jobs)
             warnings.extend(parse_warnings)
-
-        graph = Graph(source_system=SOURCE_AUTOSYS_JIL, env=self.env)
         self._job_counts_by_source_file = self._count_jobs_by_source_file(jobs)
+        self._raw_deleted_jobs = deleted
+        self._raw_parse_warnings = warnings
+        return jobs
+
+    def parse(self, input_path: Path) -> Graph:
+        jobs = self.parse_raw(input_path)
+        deleted = self._raw_deleted_jobs
+        warnings = self._raw_parse_warnings
+        graph = Graph(source_system=SOURCE_AUTOSYS_JIL, env=self.env)
         for warning in warnings:
             self._append_warning_once(graph, warning)
 
@@ -108,24 +151,49 @@ class AutosysJilParser:
                     graph,
                     f"Duplicate JIL job id {node.id!r}: keeping first definition from "
                     f"{existing.source_file!r}, merging duplicate from {job.source_file!r}."
-                )
+            )
             graph.add_node(node)
 
+        registry = self._build_registry(graph)
+
         for job in jobs:
-            source_id = make_node_id(SOURCE_AUTOSYS_JIL, self.env, self._job_kind(job.attributes), job.name)
-            self._add_box_edge(graph, job, source_id)
-            self._add_machine_edge(graph, job, source_id)
-            self._add_calendar_edges(graph, job, source_id)
-            self._add_command_edge(graph, job, source_id)
-            self._add_watch_file_edge(graph, job, source_id)
-            self._add_condition_edges(graph, job, source_id)
+            source_id = make_node_id(
+                SOURCE_AUTOSYS_JIL,
+                self.env,
+                self._job_kind(job.attributes),
+                job.name,
+            )
+            self._add_box_edge(graph, registry, job, source_id)
+            self._add_machine_edge(graph, registry, job, source_id)
+            self._add_calendar_edges(graph, registry, job, source_id)
+            self._add_command_edge(graph, registry, job, source_id)
+            self._add_watch_file_edge(graph, registry, job, source_id)
+            self._add_condition_edges(graph, registry, job, source_id)
 
         if deleted:
-            self._append_warning_once(graph, f"Found {len(deleted)} delete_job records. They were not added as active nodes.")
+            self._append_warning_once(
+                graph,
+                f"Found {len(deleted)} delete_job records. They were not added as active nodes.",
+            )
         if not jobs:
-            self._append_warning_once(graph, f"No active JIL insert_job/update_job records were parsed from {input_path}.")
+            self._append_warning_once(
+                graph,
+                f"No active JIL insert_job/update_job records were parsed from {input_path}.",
+            )
 
         return graph
+
+    def _build_registry(self, graph: Graph) -> _JilNodeRegistry:
+        registry = _JilNodeRegistry()
+        for node_id in graph.nodes:
+            self._register_node(registry, graph.nodes[node_id])
+        return registry
+
+    def _register_node(self, registry: _JilNodeRegistry, node: Node) -> None:
+        registry.by_exact_id[node.id] = node
+        registry.by_canonical_key.setdefault((node.kind, node.canonical_key), []).append(node)
+        if node.kind in {KIND_TASK, KIND_BOX, KIND_FILE_WATCHER}:
+            registry.by_key_any_jobkind.setdefault(node.canonical_key, []).append(node)
 
     def _load_jil_files(self, input_path: Path) -> list[tuple[Path, str, str]]:
         if not input_path.exists():
@@ -368,6 +436,7 @@ class AutosysJilParser:
     def _ensure_ref_node(
         self,
         graph: Graph,
+        registry: _JilNodeRegistry | None,
         kind: str,
         name: str,
         native_kind: str,
@@ -386,7 +455,10 @@ class AutosysJilParser:
             metadata={"synthetic": True, **(metadata or {})},
             attributes=None,
         )
-        return graph.add_node(node)
+        added = graph.add_node(node)
+        if registry is not None:
+            self._register_node(registry, added)
+        return added
 
     def _add_edge(
         self,
@@ -415,7 +487,13 @@ class AutosysJilParser:
             )
         )
 
-    def _add_box_edge(self, graph: Graph, job: JilJob, source_id: str) -> None:
+    def _add_box_edge(
+        self,
+        graph: Graph,
+        registry: _JilNodeRegistry,
+        job: JilJob,
+        source_id: str,
+    ) -> None:
         box_name = job.attributes.get("box_name")
         native_relation = "box_name"
         if not box_name:
@@ -429,6 +507,7 @@ class AutosysJilParser:
 
         box = self._resolve_ref_node(
             graph,
+            registry,
             kind=KIND_BOX,
             name=box_name,
             native_kind=native_relation,
@@ -453,6 +532,7 @@ class AutosysJilParser:
     def _resolve_ref_node(
         self,
         graph: Graph,
+        registry: _JilNodeRegistry,
         kind: str,
         name: str,
         native_kind: str,
@@ -460,16 +540,12 @@ class AutosysJilParser:
         metadata: dict[str, Any] | None = None,
     ) -> Node:
         exact_id = make_node_id(SOURCE_AUTOSYS_JIL, self.env, kind, name)
-        exact = graph.nodes.get(exact_id)
+        exact = registry.by_exact_id.get(exact_id)
         if exact:
             return exact
 
         requested_key = make_canonical_key(self.env, kind, name)
-        matches = [
-            node
-            for node in graph.nodes.values()
-            if node.kind == kind and node.canonical_key == requested_key
-        ]
+        matches = registry.by_canonical_key.get((kind, requested_key), [])
         real_matches = [node for node in matches if not node.metadata.get("synthetic")]
         candidates = real_matches or matches
         if len(candidates) == 1:
@@ -481,16 +557,38 @@ class AutosysJilParser:
                 "comparison key, created synthetic node instead.",
             )
 
-        return self._ensure_ref_node(graph, kind, name, native_kind, source_file, metadata=metadata)
+        return self._ensure_ref_node(
+            graph,
+            registry,
+            kind,
+            name,
+            native_kind,
+            source_file,
+            metadata=metadata,
+        )
 
-    def _add_machine_edge(self, graph: Graph, job: JilJob, source_id: str) -> None:
+    def _add_machine_edge(
+        self,
+        graph: Graph,
+        registry: _JilNodeRegistry,
+        job: JilJob,
+        source_id: str,
+    ) -> None:
         machine = job.attributes.get("machine")
         if not machine:
             return
-        node = self._ensure_ref_node(graph, KIND_AGENT, machine, "machine", job.source_file)
+        node = self._ensure_ref_node(
+            graph, registry, KIND_AGENT, machine, "machine", job.source_file
+        )
         self._add_edge(graph, source_id, node.id, REL_RUNS_ON, "machine", job, machine)
 
-    def _add_calendar_edges(self, graph: Graph, job: JilJob, source_id: str) -> None:
+    def _add_calendar_edges(
+        self,
+        graph: Graph,
+        registry: _JilNodeRegistry,
+        job: JilJob,
+        source_id: str,
+    ) -> None:
         for key, relation in (
             ("calendar", REL_USES_CALENDAR),
             ("run_calendar", REL_USES_CALENDAR),
@@ -500,10 +598,18 @@ class AutosysJilParser:
             if not value:
                 continue
             for name in self._split_csv_like(value):
-                node = self._ensure_ref_node(graph, KIND_CALENDAR, name, key, job.source_file)
+                node = self._ensure_ref_node(
+                    graph, registry, KIND_CALENDAR, name, key, job.source_file
+                )
                 self._add_edge(graph, source_id, node.id, relation, key, job, name)
 
-    def _add_command_edge(self, graph: Graph, job: JilJob, source_id: str) -> None:
+    def _add_command_edge(
+        self,
+        graph: Graph,
+        registry: _JilNodeRegistry,
+        job: JilJob,
+        source_id: str,
+    ) -> None:
         command = job.attributes.get("command")
         if not command or is_secret_key("command"):
             return
@@ -511,6 +617,7 @@ class AutosysJilParser:
         semantic_hash_value = semantic_command_hash(command)
         node = self._ensure_ref_node(
             graph,
+            registry,
             KIND_COMMAND,
             semantic_hash_value,
             "semantic_command_hash",
@@ -527,22 +634,68 @@ class AutosysJilParser:
         evidence = command_evidence(command, include_raw_values=self.config.include_raw_values)
         self._add_edge(graph, source_id, node.id, REL_RUNS_COMMAND, "command", job, evidence)
         for variable_name in command_variable_names(command):
-            variable = self._ensure_ref_node(graph, KIND_VARIABLE, variable_name, "command_variable", job.source_file)
-            self._add_edge(graph, source_id, variable.id, REL_USES_VARIABLE, "command_variable", job, variable_name)
+            variable = self._ensure_ref_node(
+                graph,
+                registry,
+                KIND_VARIABLE,
+                variable_name,
+                "command_variable",
+                job.source_file,
+            )
+            self._add_edge(
+                graph,
+                source_id,
+                variable.id,
+                REL_USES_VARIABLE,
+                "command_variable",
+                job,
+                variable_name,
+            )
 
-    def _add_watch_file_edge(self, graph: Graph, job: JilJob, source_id: str) -> None:
+    def _add_watch_file_edge(
+        self,
+        graph: Graph,
+        registry: _JilNodeRegistry,
+        job: JilJob,
+        source_id: str,
+    ) -> None:
         watch_file = job.attributes.get("watch_file")
         if not watch_file:
             return
-        node = self._ensure_ref_node(graph, KIND_FILE, watch_file, "watch_file", job.source_file)
+        node = self._ensure_ref_node(
+            graph, registry, KIND_FILE, watch_file, "watch_file", job.source_file
+        )
         self._add_edge(graph, source_id, node.id, REL_WATCHES_FILE, "watch_file", job, watch_file)
 
-    def _add_condition_edges(self, graph: Graph, job: JilJob, source_id: str) -> None:
+    def _add_condition_edges(
+        self,
+        graph: Graph,
+        registry: _JilNodeRegistry,
+        job: JilJob,
+        source_id: str,
+    ) -> None:
         condition = job.attributes.get("condition")
         if not condition:
             return
 
-        refs = self._parse_condition_refs(condition)
+        try:
+            parsed = parse_jil_condition_details(condition, job_name=job.name)
+            self._set_condition_expr(graph, source_id, expr.render(parsed.expression))
+            refs = self._condition_refs_from_expr(parsed)
+            for warning in parsed.warnings:
+                self._append_warning_once(graph, warning)
+        except JilConditionError as exc:
+            for warning in exc.warnings:
+                self._append_warning_once(graph, warning)
+            self._append_warning_once(
+                graph,
+                f"JIL condition parsed in legacy mode for job {job.name}: {exc}",
+            )
+            refs = self._parse_condition_refs(condition)
+            legacy_expr = self._legacy_condition_expr(refs)
+            if legacy_expr is not None:
+                self._set_condition_expr(graph, source_id, expr.render(legacy_expr))
+
         if not refs:
             self._append_warning_once(
                 graph,
@@ -553,7 +706,13 @@ class AutosysJilParser:
 
         evidence = condition if self.config.include_raw_values else condition_hash(condition)
         for event, dep_job_name in refs:
-            dep_node = self._resolve_dependency_node(graph, dep_job_name, f"condition:{event}", job.source_file)
+            dep_node = self._resolve_dependency_node(
+                graph,
+                registry,
+                dep_job_name,
+                f"condition:{event}",
+                job.source_file,
+            )
             relation = {
                 "success": REL_DEPENDS_ON_SUCCESS,
                 "done": REL_DEPENDS_ON_DONE,
@@ -572,36 +731,95 @@ class AutosysJilParser:
                 confidence=0.95,
             )
 
-    def _resolve_dependency_node(self, graph: Graph, name: str, native_kind: str, source_file: str) -> Node:
+    def _set_condition_expr(self, graph: Graph, source_id: str, rendered: str) -> None:
+        node = graph.nodes.get(source_id)
+        if node:
+            node.metadata["condition_expr"] = rendered
+
+    def _condition_refs_from_expr(self, parsed: ParsedJilCondition) -> list[tuple[str, str]]:
+        refs: list[tuple[str, str]] = []
+        for atom in expr.atoms(parsed.expression):
+            event = self._event_for_predicate(atom.predicate)
+            if not event:
+                continue
+            dep_job_name = parsed.atom_names.get(
+                (atom.node_ref, atom.predicate, atom.qualifier),
+                atom.node_ref,
+            )
+            refs.append((event, dep_job_name))
+        return refs
+
+    def _event_for_predicate(self, predicate: str) -> str:
+        return {
+            expr.SUCCESS: "success",
+            expr.DONE: "done",
+            expr.FAILURE: "failure",
+            expr.TERMINATED: "terminated",
+            expr.NOT_RUNNING: "notrunning",
+            expr.EXIT: "exit",
+        }.get(predicate, "")
+
+    def _legacy_condition_expr(self, refs: list[tuple[str, str]]) -> expr.Expr | None:
+        atoms = tuple(
+            expr.Atom(
+                node_ref=logical_leaf(dep_job_name),
+                predicate={
+                    "success": expr.SUCCESS,
+                    "done": expr.DONE,
+                    "failure": expr.FAILURE,
+                    "terminated": expr.TERMINATED,
+                    "notrunning": expr.NOT_RUNNING,
+                    "exit": expr.EXIT,
+                }.get(event, expr.SUCCESS),
+            )
+            for event, dep_job_name in refs
+        )
+        if not atoms:
+            return None
+        if len(atoms) == 1:
+            return expr.canonicalize(atoms[0])
+        return expr.canonicalize(expr.And(atoms))
+
+    def _resolve_dependency_node(
+        self,
+        graph: Graph,
+        registry: _JilNodeRegistry,
+        name: str,
+        native_kind: str,
+        source_file: str,
+    ) -> Node:
         candidates: list[Node] = []
         for kind in (KIND_TASK, KIND_BOX, KIND_FILE_WATCHER):
-            exact = graph.nodes.get(make_node_id(SOURCE_AUTOSYS_JIL, self.env, kind, name))
+            exact = registry.by_exact_id.get(
+                make_node_id(SOURCE_AUTOSYS_JIL, self.env, kind, name)
+            )
             if exact:
                 candidates.append(exact)
 
         if not candidates:
-            requested_keys = {
-                make_canonical_key(self.env, kind, name): kind
+            requested_keys = tuple(
+                make_canonical_key(self.env, kind, name)
                 for kind in (KIND_TASK, KIND_BOX, KIND_FILE_WATCHER)
-            }
-            candidates = [
-                node
-                for node in graph.nodes.values()
-                if node.kind in {KIND_TASK, KIND_BOX, KIND_FILE_WATCHER}
-                and node.canonical_key in requested_keys
-                and not node.metadata.get("synthetic")
-            ]
+            )
+            candidates = []
+            for key in requested_keys:
+                candidates.extend(
+                    node
+                    for node in registry.by_key_any_jobkind.get(key, [])
+                    if not node.metadata.get("synthetic")
+                )
 
         if len(candidates) == 1:
             return candidates[0]
         if len(candidates) > 1:
             self._append_warning_once(
                 graph,
-                f"Ambiguous JIL condition reference {name!r}: matched {len(candidates)} active jobs/boxes, "
+                f"Ambiguous JIL condition reference {name!r}: matched "
+                f"{len(candidates)} active jobs/boxes, "
                 "created synthetic task node instead.",
             )
 
-        return self._ensure_ref_node(graph, KIND_TASK, name, native_kind, source_file)
+        return self._ensure_ref_node(graph, registry, KIND_TASK, name, native_kind, source_file)
 
     def _parse_condition_refs(self, condition: str) -> list[tuple[str, str]]:
         refs: list[tuple[str, str]] = []

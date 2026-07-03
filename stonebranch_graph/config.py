@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
-import json
 
 from .domain import (
     KIND_AGENT,
@@ -12,11 +12,11 @@ from .domain import (
     KIND_CREDENTIAL,
     KIND_EMAIL_TEMPLATE,
     KIND_FILE_WATCHER,
-    KIND_WORKFLOW,
     KIND_SCRIPT,
     KIND_TASK,
     KIND_TRIGGER,
     KIND_VARIABLE,
+    KIND_WORKFLOW,
     REL_CONTAINS,
     REL_DEPENDS_ON,
     REL_DEPENDS_ON_DONE,
@@ -38,7 +38,6 @@ from .domain import (
     REL_USES_VARIABLE,
     REL_WATCHES_FILE,
 )
-
 
 STONEBRANCH_FOLDER_KIND_MAP = {
     "agent_clusters": KIND_AGENT_CLUSTER,
@@ -202,7 +201,7 @@ class AnalyzerConfig:
     include_raw_values: bool = False
 
     @staticmethod
-    def default() -> "AnalyzerConfig":
+    def default() -> AnalyzerConfig:
         return AnalyzerConfig(
             folder_kind_map=STONEBRANCH_FOLDER_KIND_MAP,
             relation_aliases=RELATION_ALIASES,
@@ -210,7 +209,7 @@ class AnalyzerConfig:
         )
 
     @staticmethod
-    def from_file(path: Path | None) -> "AnalyzerConfig":
+    def from_file(path: Path | None) -> AnalyzerConfig:
         if path is None:
             return AnalyzerConfig.default()
 
@@ -232,7 +231,7 @@ class AnalyzerConfig:
 
 
 
-    def with_runtime_flags(self, *, include_raw_values: bool | None = None) -> "AnalyzerConfig":
+    def with_runtime_flags(self, *, include_raw_values: bool | None = None) -> AnalyzerConfig:
         return AnalyzerConfig(
             folder_kind_map=self.folder_kind_map,
             ignored_filenames=self.ignored_filenames,
@@ -253,7 +252,7 @@ class MappingConfig:
     kind_aliases: dict[str, str]
 
     @staticmethod
-    def empty(config: AnalyzerConfig) -> "MappingConfig":
+    def empty(config: AnalyzerConfig) -> MappingConfig:
         return MappingConfig(
             node_mappings={},
             name_rewrites=[],
@@ -261,7 +260,7 @@ class MappingConfig:
         )
 
     @staticmethod
-    def from_file(path: Path | None, config: AnalyzerConfig) -> "MappingConfig":
+    def from_file(path: Path | None, config: AnalyzerConfig) -> MappingConfig:
         if path is None:
             return MappingConfig.empty(config)
 

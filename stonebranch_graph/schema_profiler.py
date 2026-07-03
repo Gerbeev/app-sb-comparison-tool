@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
-from dataclasses import dataclass, field
-from pathlib import Path
 import csv
 import json
 import re
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from .config import AnalyzerConfig, SECRET_KEYWORDS
+from .config import SECRET_KEYWORDS, AnalyzerConfig
 from .utils import read_text_file
 
 JIL_EXTENSIONS = {".jil", ".txt", ".job", ".autosys"}
@@ -38,7 +38,7 @@ def profile_jil(input_path: Path, output_dir: Path) -> None:
     stats: dict[str, FieldStats] = {}
     file_count = 0
     job_count = 0
-    for file, relative, text in files:
+    for _file, relative, text in files:
         file_count += 1
         for line in text.splitlines():
             stripped = line.strip()
@@ -71,17 +71,17 @@ def profile_jil(input_path: Path, output_dir: Path) -> None:
         "| Field | Count | Types | Example files |",
         "|---|---:|---|---|",
     ]
-    for field, s in sorted(stats.items(), key=lambda x: (-x[1].count, x[0])):
+    for field_name, s in sorted(stats.items(), key=lambda x: (-x[1].count, x[0])):
         types = ", ".join(f"{k}:{v}" for k, v in s.types.most_common())
         examples = ", ".join(sorted(s.example_files)[:3])
-        lines.append(f"| `{field}` | {s.count} | {types} | `{examples}` |")
+        lines.append(f"| `{field_name}` | {s.count} | {types} | `{examples}` |")
     (output_dir / "schema-profile.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     with (output_dir / "schema-profile.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["field", "count", "types", "example_files"])
         writer.writeheader()
-        for field, s in sorted(stats.items()):
+        for field_name, s in sorted(stats.items()):
             writer.writerow({
-                "field": field,
+                "field": field_name,
                 "count": s.count,
                 "types": ";".join(f"{k}:{v}" for k, v in s.types.most_common()),
                 "example_files": ";".join(sorted(s.example_files)[:5]),
@@ -158,10 +158,10 @@ def write_schema_profile(profile: dict[str, dict[str, FieldStats]], output_path:
     ]
     for kind, fields in sorted(profile.items()):
         lines += [f"## {kind}", "", "| Field path | Count | Types | Example files |", "|---|---:|---|---|"]
-        for field, s in sorted(fields.items(), key=lambda x: (-x[1].count, x[0]))[:1000]:
+        for field_name, s in sorted(fields.items(), key=lambda x: (-x[1].count, x[0]))[:1000]:
             types = ", ".join(f"{k}:{v}" for k, v in s.types.most_common())
             examples = ", ".join(sorted(s.example_files)[:3])
-            lines.append(f"| `{field}` | {s.count} | {types} | `{examples}` |")
+            lines.append(f"| `{field_name}` | {s.count} | {types} | `{examples}` |")
         lines.append("")
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -172,10 +172,10 @@ def write_schema_csv(profile: dict[str, dict[str, FieldStats]], output_path: Pat
         writer = csv.DictWriter(f, fieldnames=["kind", "field", "count", "types", "example_files"])
         writer.writeheader()
         for kind, fields in sorted(profile.items()):
-            for field, s in sorted(fields.items()):
+            for field_name, s in sorted(fields.items()):
                 writer.writerow({
                     "kind": kind,
-                    "field": field,
+                    "field": field_name,
                     "count": s.count,
                     "types": ";".join(f"{k}:{v}" for k, v in s.types.most_common()),
                     "example_files": ";".join(sorted(s.example_files)[:5]),

@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .config import AnalyzerConfig, MappingConfig
-from .core import Edge, Graph, Node, enterprise_name_parts, comparison_name, normalize_name
+from .core import Edge, Graph, Node, comparison_name, enterprise_name_parts, normalize_name
 from .domain import (
     ARTIFACT_EDGE_RELATIONS,
     ARTIFACT_NODE_KINDS,
-    COMPARABLE_EDGE_RELATIONS,
     INFRASTRUCTURE_KINDS,
     JOB_LIKE_KINDS,
     KIND_AGENT,

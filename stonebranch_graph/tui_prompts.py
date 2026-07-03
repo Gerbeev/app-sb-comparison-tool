@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sys
-from typing import Callable
+from collections.abc import Callable
+from pathlib import Path
 
 from .native_dialogs import pick_directory, pick_file
 from .tui_rendering import color_text
-
 
 WarnFn = Callable[[str], None]
 

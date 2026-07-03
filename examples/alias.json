@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "logical_ids": {
+    "stonebranch": {
+      "WF_ETL": "etl",
+      "WF_REPORTING": "reporting",
+      "WF_ARCHIVE": "archive",
+      "extract": "extract",
+      "transform": "transform",
+      "load": "load",
+      "build_report": "build_report",
+      "publish": "publish",
+      "copy_files": "copy_files",
+      "JOB_A": "etl/extract",
+      "JOB_B": "etl/transform"
+    },
+    "autosys": {
+      "ETL": "etl",
+      "EXTRACT": "extract",
+      "TRANSFORM": "transform",
+      "LOAD": "load",
+      "REPORTING": "reporting",
+      "BUILD_REPORT": "build_report",
+      "PUBLISH": "publish",
+      "ARCHIVE": "archive",
+      "COPY_FILES": "copy_files",
+      "JOB_A": "etl/extract",
+      "JOB_B": "etl/transform",
+      "BOX_MAIN": "etl",
+      "JOB_C": "etl/load"
+    }
+  },
+  "plumbing": {
+    "stonebranch": [
+      "MON_*"
+    ],
+    "autosys": []
+  }
+}

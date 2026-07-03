@@ -1,0 +1,5 @@
+{
+  "name": "copy_files",
+  "type": "Universal Task",
+  "command": "/app/copy_files.sh"
+}

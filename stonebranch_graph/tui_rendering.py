@@ -47,6 +47,18 @@ OTHER_MENU_ITEMS = [
     ("0", "Back", "Return to the main menu.", "EXIT"),
 ]
 
+OTHER_MENU_ITEMS = [
+    ("1", "Build Stonebranch skeleton", "Create canonical Stonebranch skeleton JSONL, index CSV, and offline graph view.", "GRAPH"),
+    ("2", "Build JIL skeleton", "Create canonical JIL skeleton JSONL, index CSV, and offline graph view.", "GRAPH"),
+    ("3", "Compare skeletons", "Compare Stonebranch and JIL canonical skeletons by topology, logic, and strict levels.", "MAIN"),
+    ("4", "Run legacy direct compare", "Parse both repositories and compare with the legacy graph engine.", "GRAPH"),
+    ("5", "Compare existing graph.json files", "Compare previously generated Stonebranch/JIL graph.json files without reparsing repositories.", "GRAPH"),
+    ("6", "Profile Stonebranch schema", "Generate a safe structure profile of Stonebranch JSON keys and types without values.", "PROFILE"),
+    ("7", "Profile JIL schema", "Generate a safe structure profile of JIL job blocks and attributes.", "PROFILE"),
+    ("8", "Show last output files", "Print the most important files from the last run: manifests, reports, graph.json, metrics, diffs.", "SETUP"),
+    ("0", "Back", "Return to the main menu.", "EXIT"),
+]
+
 
 SETTINGS_MENU_ITEMS = [
     ("1", "Stonebranch source folder", "Select the Stonebranch export folder with the system folder picker."),

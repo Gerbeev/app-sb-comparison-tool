@@ -1,19 +1,31 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .alias import AliasTable
 from .compare import Comparison, compare_graphs, export_comparison
 from .config import AnalyzerConfig, MappingConfig
 from .core import Graph
-from .exporters import export_graph_bundle, load_graph_json
+from .exporters import export_csv_rows, export_graph_bundle, load_graph_json, write_text_file
+from .html_graph import export_skeleton_comparison_html, export_skeleton_html_report
 from .logging_utils import log_comparison_risks, log_exception, log_graph_warnings, log_info
 from .pack import compare_analysis_packs, create_analysis_pack
 from .parsers.autosys_jil import AutosysJilParser
 from .parsers.stonebranch_json import StonebranchJsonParser
 from .schema_profiler import profile_jil, profile_stonebranch
+from .skeleton import Skeleton, index_rows
+from .skeleton_autosys import build_autosys_skeleton
+from .skeleton_compare import (
+    SkeletonComparison,
+    compare_skeletons,
+    export_skeleton_comparison,
+    skeleton_metrics,
+)
+from .skeleton_normalize import erase_plumbing
+from .skeleton_stonebranch import build_stonebranch_skeleton
 
 
 @dataclass(frozen=True)
@@ -25,10 +37,28 @@ class GraphWorkflowResult:
 
 
 @dataclass(frozen=True)
+class SkeletonWorkflowResult:
+    skeleton: Skeleton
+    output_dir: Path
+    summary: dict[str, Any]
+    files: list[Path]
+
+
+@dataclass(frozen=True)
 class CompareWorkflowResult:
     comparison: Comparison | None
     stonebranch_graph: Graph | None
     jil_graph: Graph | None
+    output_dir: Path
+    summary: dict[str, Any]
+    files: list[Path]
+
+
+@dataclass(frozen=True)
+class CompareSkeletonResult:
+    comparison: SkeletonComparison
+    stonebranch_skeleton: Skeleton
+    jil_skeleton: Skeleton
     output_dir: Path
     summary: dict[str, Any]
     files: list[Path]
@@ -57,6 +87,18 @@ def graph_bundle_files(output_dir: Path) -> list[Path]:
         output_dir / "objects.csv",
         output_dir / "edges.csv",
         output_dir / "dependency-graph.dot",
+    ]
+
+
+def skeleton_bundle_files(output_dir: Path) -> list[Path]:
+    return [
+        output_dir / "skeleton.jsonl",
+        output_dir / "skeleton-canonical.jsonl",
+        output_dir / "skeleton-index.csv",
+        output_dir / "skeleton-graph.html",
+        output_dir / "skeleton-graph-data.js",
+        output_dir / "cytoscape.min.js",
+        output_dir / "cytoscape.LICENSE",
     ]
 
 
@@ -108,12 +150,64 @@ def comparison_pack_files(output_dir: Path) -> list[Path]:
     return [output_dir / "compare-pack-manifest.json", *comparison_files(output_dir)]
 
 
+def skeleton_comparison_files(output_dir: Path) -> list[Path]:
+    compare_dir = output_dir / "compare-skeleton"
+    return [
+        output_dir / "stonebranch" / "skeleton.jsonl",
+        output_dir / "stonebranch" / "skeleton-canonical.jsonl",
+        output_dir / "stonebranch" / "skeleton-index.csv",
+        output_dir / "stonebranch" / "skeleton-graph.html",
+        output_dir / "stonebranch" / "skeleton-graph-data.js",
+        output_dir / "stonebranch" / "cytoscape.min.js",
+        output_dir / "stonebranch" / "cytoscape.LICENSE",
+        output_dir / "jil" / "skeleton.jsonl",
+        output_dir / "jil" / "skeleton-canonical.jsonl",
+        output_dir / "jil" / "skeleton-index.csv",
+        output_dir / "jil" / "skeleton-graph.html",
+        output_dir / "jil" / "skeleton-graph-data.js",
+        output_dir / "jil" / "cytoscape.min.js",
+        output_dir / "jil" / "cytoscape.LICENSE",
+        compare_dir / "skeleton-stonebranch.jsonl",
+        compare_dir / "skeleton-jil.jsonl",
+        compare_dir / "skeleton-diff.json",
+        compare_dir / "skeleton-compare-graph.html",
+        compare_dir / "skeleton-compare-graph-data.js",
+        compare_dir / "cytoscape.min.js",
+        compare_dir / "cytoscape.LICENSE",
+        compare_dir / "skeleton-index.csv",
+        compare_dir / "report.md",
+        compare_dir / "remediation-plan.md",
+        compare_dir / "metrics.json",
+        compare_dir / "metrics.csv",
+    ]
+
+
 def schema_profile_files(output_dir: Path) -> list[Path]:
     return [output_dir / "schema-profile.md", output_dir / "schema-profile.csv"]
 
 
 def graph_summary(graph: Graph) -> dict[str, Any]:
     return {"nodes": len(graph.nodes), "edges": len(graph.edges)}
+
+
+def skeleton_summary(skeleton: Skeleton) -> dict[str, Any]:
+    return {
+        "nodes": len(skeleton.nodes),
+        "externals": len(skeleton.externals),
+        "erasures": len(skeleton.erasures),
+        "warnings": len(skeleton.warnings),
+    }
+
+
+def export_skeleton_bundle(skeleton: Skeleton, output_dir: Path) -> None:
+    write_text_file(output_dir / "skeleton.jsonl", skeleton.to_jsonl())
+    write_text_file(output_dir / "skeleton-canonical.jsonl", skeleton.to_canonical_jsonl("strict"))
+    export_csv_rows(
+        output_dir / "skeleton-index.csv",
+        ["id", "kind", "parent", "topology_hash", "logic_hash", "strict_hash"],
+        index_rows(skeleton),
+    )
+    export_skeleton_html_report(skeleton, output_dir)
 
 
 def build_stonebranch_graph(
@@ -172,6 +266,71 @@ def build_jil_graph(
         )
     except Exception as exc:
         log_exception(output_dir, "JIL graph build", exc)
+        raise
+
+
+def build_stonebranch_skeleton_workflow(
+    input_path: Path,
+    output_dir: Path,
+    config: AnalyzerConfig,
+    *,
+    alias_path: Path | None = None,
+    env: str = "default",
+    env_aware: bool = False,
+) -> SkeletonWorkflowResult:
+    log_info(output_dir, f"Starting Stonebranch skeleton build: input={input_path} env={env}")
+    try:
+        alias = AliasTable.from_file(alias_path)
+        raw = StonebranchJsonParser(config, env=env, env_aware=env_aware).parse_raw(input_path)
+        skeleton = erase_plumbing(build_stonebranch_skeleton(raw, alias=alias, config=config))
+        skeleton.warnings.extend(alias.warnings)
+        export_skeleton_bundle(skeleton, output_dir)
+        log_graph_warnings(output_dir, skeleton.warnings, source="stonebranch skeleton")
+        log_info(
+            output_dir,
+            f"Completed Stonebranch skeleton build: nodes={len(skeleton.nodes)} "
+            f"erasures={len(skeleton.erasures)}",
+        )
+        return SkeletonWorkflowResult(
+            skeleton=skeleton,
+            output_dir=output_dir,
+            summary=skeleton_summary(skeleton),
+            files=skeleton_bundle_files(output_dir),
+        )
+    except Exception as exc:
+        log_exception(output_dir, "Stonebranch skeleton build", exc)
+        raise
+
+
+def build_jil_skeleton_workflow(
+    input_path: Path,
+    output_dir: Path,
+    config: AnalyzerConfig,
+    *,
+    alias_path: Path | None = None,
+    env: str = "default",
+) -> SkeletonWorkflowResult:
+    log_info(output_dir, f"Starting JIL skeleton build: input={input_path} env={env}")
+    try:
+        alias = AliasTable.from_file(alias_path)
+        raw = AutosysJilParser(config, env=env).parse_raw(input_path)
+        skeleton = erase_plumbing(build_autosys_skeleton(raw, alias=alias))
+        skeleton.warnings.extend(alias.warnings)
+        export_skeleton_bundle(skeleton, output_dir)
+        log_graph_warnings(output_dir, skeleton.warnings, source="jil skeleton")
+        log_info(
+            output_dir,
+            f"Completed JIL skeleton build: nodes={len(skeleton.nodes)} "
+            f"erasures={len(skeleton.erasures)}",
+        )
+        return SkeletonWorkflowResult(
+            skeleton=skeleton,
+            output_dir=output_dir,
+            summary=skeleton_summary(skeleton),
+            files=skeleton_bundle_files(output_dir),
+        )
+    except Exception as exc:
+        log_exception(output_dir, "JIL skeleton build", exc)
         raise
 
 
@@ -287,6 +446,71 @@ def compare_direct(
     except Exception as exc:
         log_exception(output_dir, "Direct comparison", exc)
         raise
+
+
+def compare_skeleton_direct(
+    *,
+    stonebranch_path: Path,
+    jil_path: Path,
+    output_dir: Path,
+    config: AnalyzerConfig,
+    alias_path: Path | None = None,
+    env: str = "default",
+    env_aware: bool = False,
+) -> CompareSkeletonResult:
+    log_info(
+        output_dir,
+        "Starting direct skeleton comparison: "
+        f"stonebranch={stonebranch_path} jil={jil_path} env={env}",
+    )
+    try:
+        alias = AliasTable.from_file(alias_path)
+        sb_parser = StonebranchJsonParser(config, env=env, env_aware=env_aware)
+        jil_parser = AutosysJilParser(config, env=env)
+        sb_raw = sb_parser.parse_raw(stonebranch_path)
+        jil_raw = jil_parser.parse_raw(jil_path)
+
+        sb_skeleton = erase_plumbing(
+            build_stonebranch_skeleton(sb_raw, alias=alias, config=config)
+        )
+        jil_skeleton = erase_plumbing(build_autosys_skeleton(jil_raw, alias=alias))
+        sb_skeleton.warnings.extend(alias.warnings)
+        jil_skeleton.warnings.extend(alias.warnings)
+
+        export_skeleton_bundle(sb_skeleton, output_dir / "stonebranch")
+        export_skeleton_bundle(jil_skeleton, output_dir / "jil")
+
+        comparison = compare_skeletons(sb_skeleton, jil_skeleton)
+        export_skeleton_comparison(comparison, output_dir)
+        export_skeleton_comparison_html(
+            comparison,
+            sb_skeleton,
+            jil_skeleton,
+            output_dir / "compare-skeleton",
+        )
+        summary = skeleton_metrics(comparison)
+
+        log_graph_warnings(output_dir, sb_skeleton.warnings, source="stonebranch skeleton")
+        log_graph_warnings(output_dir, jil_skeleton.warnings, source="jil skeleton")
+        log_comparison_risks(output_dir, comparison.risks)
+        log_info(
+            output_dir,
+            "Completed direct skeleton comparison: "
+            f"topology_matched={comparison.summary_by_level['topology']['matched']} "
+            f"logic_changed={comparison.summary_by_level['logic']['changed']}",
+        )
+        return CompareSkeletonResult(
+            comparison=comparison,
+            stonebranch_skeleton=sb_skeleton,
+            jil_skeleton=jil_skeleton,
+            output_dir=output_dir,
+            summary=summary,
+            files=skeleton_comparison_files(output_dir),
+        )
+    except Exception as exc:
+        log_exception(output_dir, "Direct skeleton comparison", exc)
+        raise
+
 
 def compare_graph_json(
     *,

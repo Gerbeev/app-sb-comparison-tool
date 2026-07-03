@@ -1,0 +1,5 @@
+{
+  "name": "publish",
+  "type": "Universal Task",
+  "command": "/app/publish.sh"
+}

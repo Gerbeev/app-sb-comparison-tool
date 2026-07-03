@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 import traceback
+from pathlib import Path
 from typing import Any
 
-from .config import AnalyzerConfig
 from . import tui_actions
+from .config import AnalyzerConfig
 from .logging_utils import log_error, log_warning
 from .tui_prompts import ask, menu_choice, pick_file_setting, pick_folder_setting, yes_no_key
 from .tui_rendering import (
@@ -93,14 +93,20 @@ class TerminalUi:
             choice = self.menu_choice("Select", {item[0] for item in OTHER_MENU_ITEMS})
             try:
                 if choice == "1":
-                    self.run_compare()
+                    self.build_stonebranch_skeleton()
                 elif choice == "2":
-                    self.compare_json()
+                    self.build_jil_skeleton()
                 elif choice == "3":
-                    self.profile_stonebranch()
+                    self.compare_skeleton()
                 elif choice == "4":
-                    self.profile_jil()
+                    self.run_compare()
                 elif choice == "5":
+                    self.compare_json()
+                elif choice == "6":
+                    self.profile_stonebranch()
+                elif choice == "7":
+                    self.profile_jil()
+                elif choice == "8":
                     self.show_last_files()
                 elif choice == "0":
                     return
@@ -349,6 +355,42 @@ class TerminalUi:
         self.show_last_files(pause=False)
         self.pause()
 
+    def build_stonebranch_skeleton(self) -> None:
+        s = self.ensure_settings_for("build-skeleton-stonebranch")
+        if s is None:
+            return
+        result = tui_actions.build_stonebranch_skeleton(s, self.config)
+        self.last_summary = result.summary
+        self.last_files = result.files
+        self.success("Stonebranch skeleton created.")
+        self.print_summary(self.last_summary)
+        self.show_last_files(pause=False)
+        self.pause()
+
+    def build_jil_skeleton(self) -> None:
+        s = self.ensure_settings_for("build-skeleton-jil")
+        if s is None:
+            return
+        result = tui_actions.build_jil_skeleton(s, self.config)
+        self.last_summary = result.summary
+        self.last_files = result.files
+        self.success("JIL skeleton created.")
+        self.print_summary(self.last_summary)
+        self.show_last_files(pause=False)
+        self.pause()
+
+    def compare_skeleton(self) -> None:
+        s = self.ensure_settings_for("compare-skeleton")
+        if s is None:
+            return
+        result = tui_actions.compare_skeleton(s, self.config)
+        self.last_summary = result.summary
+        self.last_files = result.files
+        self.success("Skeleton compare completed.")
+        self.print_summary(self.last_summary)
+        self.show_last_files(pause=False)
+        self.pause()
+
     def run_compare(self) -> None:
         s = self.ensure_settings_for("direct-compare")
         if s is None:
@@ -399,9 +441,21 @@ class TerminalUi:
         s = self.settings
         missing: list[str] = []
 
-        if mode in {"build-stonebranch-pack", "direct-compare", "profile-stonebranch"} and not path_exists(s.stonebranch_path):
+        if mode in {
+            "build-stonebranch-pack",
+            "build-skeleton-stonebranch",
+            "compare-skeleton",
+            "direct-compare",
+            "profile-stonebranch",
+        } and not path_exists(s.stonebranch_path):
             missing.append("Stonebranch source folder")
-        if mode in {"build-jil-pack", "direct-compare", "profile-jil"} and not path_exists(s.jil_path):
+        if mode in {
+            "build-jil-pack",
+            "build-skeleton-jil",
+            "compare-skeleton",
+            "direct-compare",
+            "profile-jil",
+        } and not path_exists(s.jil_path):
             missing.append("JIL source folder")
         if mode == "compare-packs":
             if not (path_exists(s.stonebranch_pack_path) and (Path(s.stonebranch_pack_path) / "graph.json").exists()):

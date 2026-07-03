@@ -1,0 +1,5 @@
+{
+  "name": "load",
+  "type": "Universal Task",
+  "command": "/app/load.sh"
+}
