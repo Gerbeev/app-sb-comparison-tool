@@ -9,16 +9,11 @@ from typing import Any
 from . import expr as trigger_expr
 from .core import Graph, Node
 from .domain import (
-    CALENDAR_RELATIONS,
-    COMMAND_RELATIONS,
+    DEPENDENCY_RELATIONS,
     KIND_BOX,
+    KIND_FILE_WATCHER,
     KIND_TASK,
     KIND_WORKFLOW,
-    REL_CONTAINS,
-    REL_STARTS,
-    REL_USES_VARIABLE,
-    REL_WATCHES_FILE,
-    RUNTIME_TARGET_RELATIONS,
 )
 from .exporters import (
     build_container_view,
@@ -37,30 +32,87 @@ CYTOSCAPE_LICENSE_FILE = "cytoscape.LICENSE"
 SKELETON_TRIGGER_INLINE_NODE_THRESHOLD = 4_000
 """Above this node count, omit pure SUCCESS-AND trigger strings from skeleton HTML payloads."""
 SKELETON_DIFF_HTML_MAX_EDGES = 800
+COMPACT_JSON_THRESHOLD = 5_000
+"""Above this many jobs+edges (or skeleton nodes), stop pretty-printing graph-data.js.
 
+indent=2 is nice for small/medium reports (readable, diff-friendly), but
+roughly doubles payload size for no runtime benefit - large reports switch to
+compact JSON so download/parse time doesn't scale with indentation.
+"""
+
+
+def _payload_size_hint(payload: dict[str, Any]) -> int:
+    return len(payload.get("jobs", [])) + len(payload.get("edges", [])) + len(payload.get("nodes", []))
+
+
+def _dump_graph_payload(payload: dict[str, Any]) -> str:
+    indent = None if _payload_size_hint(payload) > COMPACT_JSON_THRESHOLD else 2
+    return json.dumps(payload, indent=indent, ensure_ascii=False, sort_keys=True)
+
+
+def _sorted_by_id_for_diff(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a graph-data payload with id-bearing list fields sorted by id.
+
+    The payload embedded in each report's `*-data.js` is already deterministic
+    (`sort_keys=True`), but list fields such as `jobs` are ordered for the UI
+    (grouped by container, then id) rather than purely by id. This produces a
+    diff-friendly sibling where every list of objects carrying an "id" field
+    is reordered to sort strictly by that id, so two reports (e.g. the
+    Stonebranch side vs. the JIL side of a comparison) can be compared
+    object-by-object in an external diff tool with minimal unrelated churn.
+    """
+
+    result = dict(payload)
+    for key, value in payload.items():
+        if isinstance(value, list) and value and all(
+            isinstance(item, dict) and "id" in item for item in value
+        ):
+            result[key] = sorted(value, key=lambda item: str(item["id"]))
+    return result
+
+
+def export_graph_data_json(payload: dict[str, Any], path: Path) -> None:
+    """Write a plain, sorted-by-id JSON sibling of a report's `*-data.js` payload.
+
+    Unlike `graph-data.js` (a `window.GRAPH_DATA = {...}` literal meant to be
+    loaded by the offline HTML viewer), this is plain JSON with no wrapper,
+    intended for manual comparison in an external diff tool: every list of
+    objects that carries an "id" field is sorted strictly by that id.
+    """
+
+    text = json.dumps(
+        _sorted_by_id_for_diff(payload),
+        indent=2,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    write_text_file(path, text + "\n")
+
+# The lightweight Cytoscape viewer only ever renders three kinds of things:
+# groups (workflow/box containers), jobs (task/file_watcher schedulable
+# units), and the dependency edges between jobs. Everything else a Graph can
+# hold (agents, calendars, credentials, connections, email templates, files,
+# objects, scripts, triggers, variables, and non-dependency relations such as
+# uses_calendar/runs_on/runs_command/...) is intentionally excluded from the
+# graph-data.js payload for graph.html and compare-graph.html - not merely
+# hidden behind a UI filter. Skeleton payloads (build_skeleton_graph_data)
+# already only ever contain container/unit nodes and trigger-derived
+# dependency edges, so they need no equivalent filtering here.
 CONTAINER_KINDS = {KIND_WORKFLOW, KIND_BOX}
+JOB_NODE_KINDS = {KIND_TASK, KIND_FILE_WATCHER}
 
-DEPENDENCY_RELATION_PREFIXES = ("depends_on",)
-
-
-RELATION_CATEGORIES = {
-    REL_CONTAINS: "contains",
-    REL_STARTS: "triggers",
-    REL_USES_VARIABLE: "variables",
-    REL_WATCHES_FILE: "files",
-}
+# Stonebranch has no dedicated "file monitor" node kind (it's just a KIND_TASK
+# whose native type names it as a monitor), so the watcher/monitor visual
+# flag is detected from the native type string in addition to the AutoSys
+# KIND_FILE_WATCHER kind.
+WATCHER_NATIVE_KIND_HINTS = ("monitor", "watch")
 
 
-def relation_category(relation: str) -> str:
-    if relation.startswith(DEPENDENCY_RELATION_PREFIXES):
-        return "dependencies"
-    if relation in RUNTIME_TARGET_RELATIONS:
-        return "runtime"
-    if relation in CALENDAR_RELATIONS:
-        return "calendars"
-    if relation in COMMAND_RELATIONS:
-        return "commands"
-    return RELATION_CATEGORIES.get(relation, "other")
+def _is_watcher_node(node: Node) -> bool:
+    if node.kind == KIND_FILE_WATCHER:
+        return True
+    native = str(node.native_kind or "").lower()
+    return any(hint in native for hint in WATCHER_NATIVE_KIND_HINTS)
 
 
 def _display_name(node: Node) -> str:
@@ -100,11 +152,15 @@ def build_cytoscape_graph_data(
     *,
     traversal: GraphTraversalCache | None = None,
 ) -> dict[str, Any]:
-    """Build the source graph view-model used by graph.html.
+    """Build the lightweight source graph view-model used by graph.html.
 
     This is intentionally separate from `graph.json`: the raw graph remains the
     source of truth, while this payload is optimized for a large interactive
-    offline HTML graph report with collapsed workflow/box groups and relation filters.
+    offline HTML graph report showing only groups (workflow/box containers),
+    jobs (task/file_watcher units), and the dependency edges between jobs.
+    Every other node kind (agents, calendars, credentials, connections, email
+    templates, files, objects, scripts, triggers, variables) and every
+    non-dependency relation is left out of this payload entirely.
     """
 
     traversal = traversal or GraphTraversalCache.build(graph)
@@ -136,9 +192,9 @@ def build_cytoscape_graph_data(
     jobs = []
     job_keys: set[str] = set()
     for node in traversal.sorted_nodes:
-        key = canonical_node_key(node)
-        if node.kind in CONTAINER_KINDS:
+        if node.kind not in JOB_NODE_KINDS:
             continue
+        key = canonical_node_key(node)
         job_keys.add(key)
         jobs.append(
             {
@@ -153,6 +209,7 @@ def build_cytoscape_graph_data(
                 "group": task_group_by_key.get(key),
                 "source_file": _html_path(node.source_file),
                 "synthetic": bool(node.metadata.get("synthetic")),
+                "watcher": _is_watcher_node(node),
                 "meta": stable_value(
                     {
                         "attributes_hash": node.attributes_hash,
@@ -171,15 +228,18 @@ def build_cytoscape_graph_data(
         if components is None:
             continue
         source, relation, target = components
+        if relation not in DEPENDENCY_RELATIONS:
+            continue
         source_key = canonical_node_key(source)
         target_key = canonical_node_key(target)
-        category = relation_category(relation)
+        if source_key not in job_keys or target_key not in job_keys:
+            continue
         payload = {
             "id": f"{source_key}|{relation}|{target_key}|{edge.id}",
             "source": source_key,
             "target": target_key,
             "relation": relation,
-            "category": category,
+            "category": "dependencies",
             "native_relation": edge.native_relation,
             "confidence": edge.confidence,
             "evidence_file": _html_path(edge.evidence_file),
@@ -189,8 +249,7 @@ def build_cytoscape_graph_data(
             "graph_edge_id": edge.id,
         }
         edges.append(payload)
-        if category == "dependencies" and source_key in job_keys and target_key in job_keys:
-            depends_on[source_key].append(target_key)
+        depends_on[source_key].append(target_key)
 
     for job in jobs:
         job["depends_on"] = sorted(set(depends_on.get(job["id"], [])))
@@ -241,10 +300,11 @@ def export_graph_data_js(
     text = (
         "/* offline HTML graph data. Generated by stonebranch-dependency-tool; do not hand-edit. */\n"
         "window.GRAPH_DATA = "
-        + json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True)
+        + _dump_graph_payload(payload)
         + ";\n"
     )
     write_text_file(path, text)
+    export_graph_data_json(payload, path.with_suffix(".json"))
 
 
 def export_cytoscape_runtime(output_dir: Path) -> None:
@@ -348,6 +408,7 @@ def export_skeleton_graph_data_js(skeleton: Skeleton, path: Path) -> None:
     payload = build_skeleton_graph_data(skeleton)
     text = _graph_data_js(payload, "offline skeleton graph data")
     write_text_file(path, text)
+    export_graph_data_json(payload, path.with_suffix(".json"))
 
 
 def export_skeleton_html_report(skeleton: Skeleton, output_dir: Path) -> None:
@@ -440,6 +501,7 @@ def export_skeleton_comparison_graph_data_js(
     )
     text = _graph_data_js(payload, "offline skeleton comparison graph data")
     write_text_file(path, text)
+    export_graph_data_json(payload, path.with_suffix(".json"))
 
 
 def export_skeleton_comparison_html(
@@ -466,7 +528,7 @@ def _graph_data_js(payload: dict[str, Any], description: str) -> str:
     return (
         f"/* {description}. Generated by stonebranch-dependency-tool; do not hand-edit. */\n"
         "window.GRAPH_DATA = "
-        + json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True)
+        + _dump_graph_payload(payload)
         + ";\n"
     )
 
@@ -501,10 +563,28 @@ def _skeleton_node_payload(
         "meta": meta,
         "source_file": _html_path(str(meta.get("src") or "")),
         "native": meta.get("native"),
+        "watcher": _skeleton_is_watcher(node, meta),
     }
     if erased_counts.get(node.id):
         payload["plumbing_erased_count"] = erased_counts[node.id]
     return payload
+
+
+def _skeleton_is_watcher(node: SkeletonNode, meta: dict[str, Any]) -> bool:
+    """True for AutoSys file-watcher jobs and Stonebranch file-monitor tasks.
+
+    AutoSys marks this explicitly via job_type (f/fw/file_watcher); Stonebranch
+    has no dedicated kind for it, so it only shows up as a "monitor"/"watch"
+    hint in the native task type string. Same detection as _is_watcher_node,
+    kept separate because skeleton nodes carry meta.type instead of a Node.
+    """
+
+    if node.kind != KIND_UNIT:
+        return False
+    token = str(meta.get("type") or "").strip().lower()
+    if token in {"f", "fw", "file_watcher", "filewatcher"}:
+        return True
+    return any(hint in token for hint in WATCHER_NATIVE_KIND_HINTS)
 
 
 def _skeleton_trigger_payload(
@@ -535,6 +615,7 @@ def _external_stub_payload(node_id: str) -> dict[str, Any]:
         "meta": {"src": None, "native": node_id},
         "source_file": "",
         "native": node_id,
+        "watcher": False,
     }
 
 
@@ -919,10 +1000,11 @@ def export_comparison_graph_data_js(comparison: Any, stonebranch: Graph, jil: Gr
     text = (
         "/* offline comparison graph data. Generated by stonebranch-dependency-tool; do not hand-edit. */\n"
         "window.GRAPH_DATA = "
-        + json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True)
+        + _dump_graph_payload(payload)
         + ";\n"
     )
     write_text_file(path, text)
+    export_graph_data_json(payload, path.with_suffix(".json"))
 
 
 def export_comparison_html_report(comparison: Any, stonebranch: Graph, jil: Graph, output_dir: Path) -> None:
@@ -952,116 +1034,152 @@ CYTOSCAPE_HTML = r'''<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>__GRAPH_TITLE__</title>
 <style>
-  :root { --bg:#f6f8fb; --panel:#fff; --text:#202832; --muted:#6b7785; --border:#d8dee8; --accent:#1c7ed6; --danger:#e03131; --ok:#2f9e44; --warn:#f08c00; --purple:#7048e8; }
+  :root {
+    --bg:#f5f7fa; --panel:#ffffff; --panel-2:#eef1f5; --border:#d8dee6;
+    --text:#1f2730; --muted:#687585; --accent:#1c7ed6;
+    --ok:#2f9e44; --danger:#e03131; --warn:#f08c00; --purple:#7048e8; --watcher:#0ca678;
+  }
   * { box-sizing: border-box; }
-  html, body { height:100%; margin:0; }
-  body { background:var(--bg); color:var(--text); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; overflow:hidden; }
-  header { min-height:58px; display:flex; align-items:center; gap:10px; padding:10px 14px; background:var(--panel); border-bottom:1px solid var(--border); flex-wrap:wrap; }
-  h1 { font-size:16px; margin:0 8px 0 0; }
-  input, select, button { border:1px solid var(--border); background:#fff; color:var(--text); border-radius:8px; padding:7px 10px; font-size:13px; }
-  button { cursor:pointer; white-space:nowrap; }
-  button:hover, button.active { background:#eef2f6; border-color:#b8c3d2; }
-  #search { width:260px; max-width:36vw; }
-  .stats { margin-left:auto; display:flex; gap:12px; color:var(--muted); font-size:12px; flex-wrap:wrap; }
-  .stats b { color:var(--text); }
-  .layout { display:flex; height:calc(100vh - 58px); min-height:0; }
-  #graphWrap { flex:1; min-width:0; height:100%; position:relative; background:linear-gradient(180deg,#f8fafc,#eef3f8); }
-  #cy { width:100%; height:100%; display:block; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+    background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; z-index: 5;
+  }
+  header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; }
+  .crumb { font-size: 12px; color: var(--muted); } .crumb b { color: var(--text); }
+  .search-wrap { position: relative; }
+  #search {
+    background: #fff; border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 7px 30px 7px 12px; width: 210px; outline: none; font-size: 13px;
+  }
+  #search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(28,126,214,.12); }
+  #searchCount { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); font-size: 11px; color: var(--muted); }
+  select, button {
+    background: #fff; color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 7px 10px; cursor: pointer; font-size: 13px; white-space: nowrap;
+    transition: background .12s, border-color .12s;
+  }
+  button:hover, button.active { background: var(--panel-2); border-color: #c2cad3; }
+  button.active { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  button:active { transform: translateY(1px); }
+  .sep { width: 1px; height: 24px; background: var(--border); margin: 0 4px; }
+  .spacer { flex: 1; }
+  .stats { color: var(--muted); font-size: 12px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .stats b { color: var(--text); font-weight: 600; }
+  .stats .good { color: var(--ok); } .stats .bad { color: var(--danger); }
+
+  .body { flex: 1; display: flex; min-height: 0; }
+  #graphWrap { flex: 1; min-width: 0; height: 100%; position: relative; background: var(--bg); }
+  #cy { width: 100%; height: 100%; display: block; }
   .runtime-error { display:none; position:absolute; inset:18px; padding:16px; border:1px solid #ffc9c9; border-radius:8px; background:#fff5f5; color:#c92a2a; z-index:2; }
-  aside { width:360px; flex:none; background:var(--panel); border-left:1px solid var(--border); display:flex; flex-direction:column; min-height:0; }
-  .panel-head { padding:14px 16px; border-bottom:1px solid var(--border); }
-  .panel-title { font-weight:700; font-size:16px; word-break:break-word; }
-  .panel-sub { color:var(--muted); font-size:12px; margin-top:3px; word-break:break-word; }
-  .panel-body { padding:12px 16px; overflow:auto; }
-  .kv { display:flex; justify-content:space-between; gap:12px; border-bottom:1px solid #edf0f4; padding:5px 0; font-size:12.5px; }
-  .kv span:first-child { color:var(--muted); }
-  .kv span:last-child { text-align:right; word-break:break-word; }
-  .section { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.6px; margin:16px 0 6px; }
-  .edge-card { border:1px solid #edf0f4; border-radius:8px; padding:8px; margin:7px 0; background:#fbfcfe; }
+
+  #panel {
+    width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  #panel .p-head { padding: 14px 16px 12px; border-bottom: 1px solid var(--border); }
+  #panel .p-title { font-size: 16px; font-weight: 600; word-break: break-word; }
+  #panel .p-sub { font-size: 12px; color: var(--muted); margin-top: 3px; word-break: break-word; }
+  #panel .p-body { padding: 12px 16px; overflow-y: auto; flex: 1; }
+  .kv { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; padding: 5px 0; border-bottom: 1px solid #eef1f5; }
+  .kv .k { color: var(--muted); } .kv .v { color: var(--text); text-align: right; word-break: break-word; }
+  .sec-title { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 16px 0 6px; display: flex; align-items: center; gap: 6px; }
+  .sec-title .arrow { font-weight: 700; } .sec-title.up .arrow { color: var(--warn); } .sec-title.down .arrow { color: var(--ok); }
+  .count-pill { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 0 7px; font-size: 11px; color: var(--text); }
+  .chain-note { font-size: 11.5px; color: var(--muted); margin: 2px 0 0; }
+  .dep-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 7px; cursor: pointer; font-size: 12.5px; transition: background .1s; }
+  .dep-item:hover { background: var(--panel-2); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .dot.watcher { border-radius: 2px; transform: rotate(45deg); }
+  .box-dot { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+  .dep-item .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .empty { color: var(--muted); font-size: 12px; padding: 4px 0; }
+  .placeholder { color: var(--muted); font-size: 13px; line-height: 1.7; }
+  .placeholder kbd { background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; font-size: 11px; }
+  .legend-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 12.5px; cursor: pointer; padding: 3px 6px; border-radius: 6px; }
+  .legend-row:hover { background: var(--panel-2); }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+  .swatch.watcher { border-radius: 2px; transform: rotate(45deg); width:10px; height:10px; }
+  .edge-card { border:1px solid #eef1f5; border-radius:8px; padding:8px; margin:7px 0; background:#fbfcfe; }
   .edge-main { display:flex; gap:7px; align-items:center; cursor:pointer; font-size:12.5px; }
   .edge-main b { margin-left:auto; word-break:break-word; text-align:right; }
   .edge-meta { margin-top:4px; color:var(--muted); font-size:11px; word-break:break-word; }
-  .pill { display:inline-block; border:1px solid var(--border); border-radius:999px; padding:1px 6px; font-size:11px; color:var(--muted); }
   .copy-row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin:5px 0; }
   .copy-btn { padding:4px 7px; font-size:11px; border-radius:7px; }
   code.copyable { background:#f1f3f5; border:1px solid #e9ecef; border-radius:6px; padding:3px 5px; font-size:11.5px; word-break:break-all; }
   .linkish { color:var(--accent); cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
-  .placeholder { color:var(--muted); font-size:12px; }
-  .legend, .status-grid { display:grid; grid-template-columns:1fr auto; gap:7px 12px; align-items:center; font-size:12px; }
-  .legend span, .status-chip { display:flex; gap:6px; align-items:center; min-width:0; }
-  .sw { display:inline-block; width:10px; height:10px; border-radius:50%; flex:none; }
   @media (max-width: 860px) {
     body { overflow:auto; }
-    header { min-height:auto; }
-    #search { width:100%; max-width:none; }
-    .stats { margin-left:0; width:100%; }
-    .layout { flex-direction:column; height:auto; min-height:calc(100vh - 110px); }
-    #graphWrap { height:58vh; min-height:420px; }
-    aside { width:100%; min-height:360px; border-left:0; border-top:1px solid var(--border); }
+    .body { flex-direction: column; height: auto; min-height: calc(100vh - 60px); }
+    #graphWrap { height: 58vh; min-height: 420px; }
+    #panel { width: 100%; min-height: 360px; border-left:0; border-top:1px solid var(--border); }
   }
 </style>
 <script src="__CYTOSCAPE_RUNTIME_FILE__"></script>
 <script src="__GRAPH_DATA_FILE__"></script>
 </head>
 <body>
-<header>
-  <h1>__GRAPH_TITLE__</h1>
-  <input id="search" type="search" placeholder="Search task/job/workflow" />
-  <select id="relationFilter" title="Relation filter">
-    <option value="all">All relations</option>
-    <option value="dependencies">Dependencies</option>
-    <option value="contains">Containers</option>
-    <option value="triggers">Triggers</option>
-    <option value="runtime">Runtime</option>
-    <option value="calendars">Calendars</option>
-    <option value="commands">Commands</option>
-    <option value="variables">Variables</option>
-    <option value="files">Files</option>
-    <option value="other">Other</option>
-  </select>
-  <select id="statusFilter" title="Status filter">
-    <option value="all">All statuses</option>
-    <option value="problems">Problems</option>
-    <option value="critical">Critical</option>
-    <option value="missing">Missing</option>
-    <option value="commands">Command diffs</option>
-    <option value="syntax">Syntax only</option>
-    <option value="semantic">Semantic mismatch</option>
-    <option value="collisions">Collisions</option>
-  </select>
-  <select id="levelFilter" title="Skeleton diff level">
-    <option value="topology">Topology</option>
-    <option value="logic" selected>Logic</option>
-    <option value="strict">Strict</option>
-  </select>
-  <button id="showProblems">Problems</button>
-  <button id="showCritical">Critical</button>
-  <button id="showMissing">Missing</button>
-  <button id="showAll">Show all</button>
-  <button id="collapse">Collapse groups</button>
-  <button id="expand">Expand groups</button>
-  <button id="dir">Direction: LR</button>
-  <button id="fit">Fit</button>
-  <div class="stats">
-    <span>Groups <b id="nGroups">0</b></span>
-    <span>Jobs <b id="nJobs">0</b></span>
-    <span>Edges <b id="nEdges">0</b></span>
-    <span>Wheel to zoom, drag to pan</span>
-  </div>
-</header>
-<div class="layout">
-  <main id="graphWrap">
-    <div id="cy"></div>
-    <div id="runtimeError" class="runtime-error"></div>
-  </main>
-  <aside>
-    <div class="panel-head">
-      <div id="pTitle" class="panel-title">Overview</div>
-      <div id="pSub" class="panel-sub"></div>
+  <header>
+    <h1>__GRAPH_TITLE__</h1>
+    <span class="crumb" id="crumb">all boxes collapsed</span>
+    <div class="sep"></div>
+    <div class="search-wrap">
+      <input id="search" type="text" placeholder="Search task/job/workflow... (/)" autocomplete="off" />
+      <span id="searchCount"></span>
     </div>
-    <div id="pBody" class="panel-body"></div>
-  </aside>
-</div>
+    <select id="statusFilter" title="Status filter">
+      <option value="all">All statuses</option>
+      <option value="problems">Problems</option>
+      <option value="critical">Critical</option>
+      <option value="missing">Missing</option>
+      <option value="commands">Command diffs</option>
+      <option value="syntax">Syntax only</option>
+      <option value="semantic">Semantic mismatch</option>
+      <option value="collisions">Collisions</option>
+    </select>
+    <select id="levelFilter" title="Skeleton diff level">
+      <option value="topology">Topology</option>
+      <option value="logic" selected>Logic</option>
+      <option value="strict">Strict</option>
+    </select>
+    <button id="showProblems">Problems</button>
+    <button id="showCritical">Critical</button>
+    <button id="showMissing">Missing</button>
+    <button id="showAll">Show all</button>
+    <div class="sep"></div>
+    <button id="expandAll">Expand all</button>
+    <button id="collapseAll">Collapse all</button>
+    <button id="fit">Fit</button>
+    <button id="zoomOut" title="Zoom out">&minus;</button>
+    <button id="zoomIn" title="Zoom in">&plus;</button>
+    <button id="dir">TB</button>
+    <div class="spacer"></div>
+    <div class="stats">
+      <span><b id="nJobs">0</b> jobs</span>
+      <span><b id="nBoxes">0</b> boxes</span>
+      <span><b id="nEdges">0</b> deps</span>
+      <span id="health"></span>
+    </div>
+  </header>
+
+  <div class="body">
+    <main id="graphWrap">
+      <div id="cy"></div>
+      <div id="runtimeError" class="runtime-error"></div>
+    </main>
+    <aside id="panel">
+      <div class="p-head">
+        <div class="p-title" id="pTitle">Overview</div>
+        <div class="p-sub" id="pSub">Click a box to expand it</div>
+      </div>
+      <div class="p-body" id="pBody"></div>
+    </aside>
+  </div>
 <script>
 (function(){
 'use strict';
@@ -1072,7 +1190,8 @@ const isSkeletonReport = ['skeleton','skeleton_comparison'].includes(DATA.metada
 const hasStrictnessLevels = !!(DATA.metadata?.strictness_levels || []).length;
 const quickFilters = ['showProblems', 'showCritical', 'showMissing', 'showAll'];
 if(!hasComparisonStatuses){
-  for(const id of ['showProblems', 'showCritical', 'showMissing']) $(id).style.display = 'none';
+  $('statusFilter').style.display = 'none';
+  for(const id of quickFilters) $(id).style.display = 'none';
 }
 if(!hasStrictnessLevels) $('levelFilter').style.display = 'none';
 if(typeof window.cytoscape !== 'function'){
@@ -1081,16 +1200,10 @@ if(typeof window.cytoscape !== 'function'){
   return;
 }
 
-let expanded = false;
-let direction = 'LR';
-let activeStatusFilter = 'all';
+/* ---------------------------------------------------------------------
+   Data indices
+   ------------------------------------------------------------------- */
 let activeStrictnessLevel = DATA.metadata?.strictness_level || 'logic';
-let visibleCategories = new Set(['all']);
-let selectedId = null;
-let highlighted = new Set();
-let faded = new Set();
-let cy = null;
-
 function applyStrictnessStatuses(level){
   activeStrictnessLevel = level;
   for(const item of [...(DATA.groups || []), ...(DATA.jobs || []), ...(DATA.nodes || [])]){
@@ -1099,50 +1212,83 @@ function applyStrictnessStatuses(level){
   if(DATA.metadata?.statuses_by_level?.[level]) DATA.metadata.statuses = DATA.metadata.statuses_by_level[level];
 }
 applyStrictnessStatuses(activeStrictnessLevel);
-$('levelFilter').value = activeStrictnessLevel;
+if(hasStrictnessLevels) $('levelFilter').value = activeStrictnessLevel;
 
 const groupById = Object.fromEntries((DATA.groups || []).map(g => [g.id, g]));
 const jobById = Object.fromEntries((DATA.jobs || []).map(j => [j.id, j]));
 const nodeById = {...groupById, ...jobById};
 const edgeById = Object.fromEntries((DATA.edges || []).map(e => [e.id, e]));
-const outEdges = {};
-const inEdges = {};
+const outEdges = {}, inEdges = {};
 for(const e of DATA.edges || []){
   (outEdges[e.source] ||= []).push(e);
   (inEdges[e.target] ||= []).push(e);
 }
-// Precomputed group -> children index (perf: avoids an O(jobs) scan per group
-// per visibility check; groupHasMatchingChild becomes O(children of group)).
-// Jobs are the same objects referenced by DATA.jobs, so status mutations from
-// applyStrictnessStatuses() are visible here too without rebuilding the index.
-const childrenByGroup = {};
-for(const j of DATA.jobs || []){
-  if(j.group) (childrenByGroup[j.group] ||= []).push(j);
-}
-const LARGE_GRAPH_ELEMENT_THRESHOLD = 1500;
 
-function escapeHtml(value){
-  return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+// Containment: '' is the synthetic root bucket for top-level groups / ungrouped jobs.
+const childGroupsByParent = {};
+const childJobsByGroup = {};
+for(const g of DATA.groups || []) (childGroupsByParent[g.parent || ''] ||= []).push(g.id);
+for(const j of DATA.jobs || []) (childJobsByGroup[j.group || ''] ||= []).push(j.id);
+function directChildGroups(groupId){ return childGroupsByParent[groupId === null ? '' : groupId] || []; }
+function directChildJobs(groupId){ return childJobsByGroup[groupId === null ? '' : groupId] || []; }
+
+function parentOf(id){
+  if(groupById[id]) return groupById[id].parent || null;
+  if(jobById[id]) return jobById[id].group || null;
+  return null;
 }
-function text(value, max=28){
-  const s = String(value ?? '');
-  return s.length > max ? s.slice(0, max - 1) + '...' : s;
+function ancestorChain(id){
+  // Group ids from the top-level ancestor down to id's immediate parent (excludes id itself).
+  const chain = [];
+  let p = parentOf(id);
+  while(p !== null && p !== undefined){ chain.unshift(p); p = parentOf(p); }
+  return chain;
 }
-function kindColor(kind){
-  return {unit:'#1c7ed6', container:'#7048e8', task:'#1c7ed6', box:'#7048e8', workflow:'#7048e8', agent:'#2f9e44', calendar:'#e8590c', command:'#495057', script:'#495057', file_watcher:'#1098ad', file:'#1098ad', variable:'#d6336c'}[kind] || '#868e96';
+function topAncestorOf(id){
+  const chain = ancestorChain(id);
+  if(chain.length) return chain[0];
+  return groupById[id] ? id : null;
 }
+
+const DOMAIN_PALETTE = ['#1c7ed6','#7048e8','#2f9e44','#e8590c','#1098ad','#d6336c','#f08c00','#5f3dc4','#0ca678','#e64980'];
+const topLevelGroupIds = directChildGroups(null).slice().sort();
+const domainColor = {};
+topLevelGroupIds.forEach((id,i) => { domainColor[id] = DOMAIN_PALETTE[i % DOMAIN_PALETTE.length]; });
+function colorFor(id){
+  const dom = topAncestorOf(id);
+  return (dom && domainColor[dom]) || '#868e96';
+}
+
+const descendantJobsCache = {};
+function descendantJobs(groupId){
+  if(descendantJobsCache[groupId]) return descendantJobsCache[groupId];
+  const result = [];
+  const stack = [groupId];
+  while(stack.length){
+    const gid = stack.pop();
+    for(const jid of directChildJobs(gid)) result.push(jid);
+    for(const sub of directChildGroups(gid)) stack.push(sub);
+  }
+  descendantJobsCache[groupId] = result;
+  return result;
+}
+
+/* ---------------------------------------------------------------------
+   Status / comparison helpers (only meaningful for compare* report types;
+   for plain graph.html / skeleton-graph.html every status is undefined and
+   statusMatches() is always true, so this simply never filters anything out).
+   ------------------------------------------------------------------- */
 function statusColor(status){
-  if(isSkeletonReport) return {matched:'#64748b', changed:'#f08c00', 'only-sb':'#2f9e44', 'only-jil':'#e03131'}[status] || null;
+  if(!status) return null;
+  if(isSkeletonReport) return {matched:'#94a3b8', changed:'#f08c00', 'only-sb':'#2f9e44', 'only-jil':'#e03131'}[status] || null;
   return {matched:'#2f9e44', missing_in_stonebranch:'#e03131', missing_in_jil:'#1c7ed6', missing_critical_in_stonebranch:'#c92a2a', missing_critical_in_jil:'#364fc7', command_syntax_diff_only:'#f08c00', command_semantic_mismatch:'#c92a2a', condition_mismatch:'#f08c00', normalized_key_collision:'#862e9c', stonebranch_only:'#1c7ed6', jil_only:'#e03131'}[status] || null;
-}
-function edgeColor(cat, status, predicate){
-  if(isSkeletonReport && predicate && predicate !== 'SUCCESS') return '#be123c';
-  return statusColor(status) || {dependencies:'#e03131', contains:'#7048e8', triggers:'#f08c00', runtime:'#2f9e44', calendars:'#e8590c', commands:'#495057', variables:'#d6336c', files:'#1098ad'}[cat] || '#868e96';
 }
 function isProblemStatus(status){
   return !!status && !['matched','stonebranch_only','jil_only'].includes(status);
 }
-function statusMatches(status, filter=activeStatusFilter){
+let activeStatusFilter = 'all';
+function statusMatches(status, filter){
+  filter = filter === undefined ? activeStatusFilter : filter;
   if(filter === 'all') return true;
   if(filter === 'problems') return isProblemStatus(status);
   if(filter === 'missing') return ['missing_in_stonebranch','missing_in_jil','missing_critical_in_stonebranch','missing_critical_in_jil','only-sb','only-jil'].includes(status);
@@ -1153,15 +1299,56 @@ function statusMatches(status, filter=activeStatusFilter){
   if(filter === 'collisions') return status === 'normalized_key_collision';
   return true;
 }
-function label(x){ return x.label || x.name || x.id; }
+function groupHasMatchingChild(groupId){
+  return descendantJobs(groupId).some(jid => statusMatches(jobById[jid]?.status));
+}
+function nodeMatchesCurrentStatus(entity){
+  if(!entity) return false;
+  if(activeStatusFilter === 'all') return true;
+  if(statusMatches(entity.status)) return true;
+  if(groupById[entity.id] && groupHasMatchingChild(entity.id)) return true;
+  return false;
+}
+function edgeStatusPasses(e){
+  if(activeStatusFilter === 'all') return true;
+  if(statusMatches(e.status)) return true;
+  if(statusMatches(jobById[e.source]?.status)) return true;
+  if(statusMatches(jobById[e.target]?.status)) return true;
+  return false;
+}
+const STATUS_SEVERITY = ['missing_critical_in_stonebranch','missing_critical_in_jil','command_semantic_mismatch','normalized_key_collision','missing_in_stonebranch','missing_in_jil','command_syntax_diff_only','condition_mismatch','only-sb','only-jil','changed','matched'];
+function worstEdgeStatus(edges){
+  let best, bestRank = Infinity;
+  for(const e of edges){
+    const idx = STATUS_SEVERITY.indexOf(e.status);
+    const rank = idx === -1 ? (e.status ? 500 : 1000) : idx;
+    if(rank < bestRank){ bestRank = rank; best = e.status; }
+  }
+  return best;
+}
+
+/* ---------------------------------------------------------------------
+   Small utilities
+   ------------------------------------------------------------------- */
+function escapeHtml(value){
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function text(value, max){
+  max = max || 28;
+  const s = String(value ?? '');
+  return s.length > max ? s.slice(0, max - 1) + '...' : s;
+}
+function label(entity){ return entity?.label || entity?.name || entity?.id || ''; }
 function metaRows(obj){
   return Object.entries(obj || {})
     .filter(([,v]) => v !== null && v !== undefined && v !== '')
-    .map(([k,v]) => `<div class="kv"><span>${escapeHtml(k)}</span><span>${escapeHtml(String(v))}</span></div>`)
+    .map(([k,v]) => `<div class="kv"><span class="k">${escapeHtml(k)}</span><span class="v">${escapeHtml(String(v))}</span></div>`)
     .join('');
 }
-function copyButton(value, label='Copy'){
-  return value ? `<button class="copy-btn" data-copy="${escapeHtml(value)}">${escapeHtml(label)}</button>` : '';
+function kv(k, v){ return `<div class="kv"><span class="k">${escapeHtml(k)}</span><span class="v">${escapeHtml(String(v ?? '—'))}</span></div>`; }
+function copyButton(value, lbl){
+  lbl = lbl || 'Copy';
+  return value ? `<button class="copy-btn" data-copy="${escapeHtml(value)}">${escapeHtml(lbl)}</button>` : '';
 }
 function copyable(value){
   return value ? `<code class="copyable">${escapeHtml(value)}</code>` : '<span class="placeholder">not available</span>';
@@ -1170,383 +1357,738 @@ function copyText(value){
   if(!value) return;
   if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(value).catch(()=>{});
 }
-function groupHasMatchingChild(groupId){
-  return (childrenByGroup[groupId] || []).some(j => statusMatches(j.status));
-}
-function nodeMatchesCurrentStatus(n){
-  if(activeStatusFilter === 'all') return true;
-  if(statusMatches(n.status)) return true;
-  if(groupById[n.id] && groupHasMatchingChild(n.id)) return true;
-  return false;
-}
-// visibleNodes()/visibleEdges() are the hottest path in the viewer: every
-// rebuild (buildCy/relayout), every filter toggle, and every selection touches
-// them. computeVisibleData() does the O(groups+jobs+edges) scan exactly once
-// per distinct combination of the inputs that can change its result; repeated
-// calls with the same inputs (e.g. visibleEdges() re-deriving visibleNodes(),
-// or toCytoscapeElements() calling both) reuse the cached result instead of
-// re-scanning (perf task 10).
-let visibleCache = null;
-function visibleCacheKey(){
-  return [activeStatusFilter, [...visibleCategories].sort().join(','), expanded, activeStrictnessLevel].join('|');
-}
-function computeVisibleData(){
-  const base = expanded || !(DATA.groups || []).length ? [...DATA.groups, ...DATA.jobs] : DATA.groups.slice();
-  const nodes = base
-    .map(n => ({...n, type: groupById[n.id] ? 'group' : 'job'}))
-    .filter(n => nodeMatchesCurrentStatus(n));
-  const nodeIds = new Set(nodes.map(n => n.id));
-  const edges = (DATA.edges || []).filter(e => {
-    if(!nodeIds.has(e.source) || !nodeIds.has(e.target)) return false;
-    if(activeStatusFilter !== 'all' && e.status && !statusMatches(e.status) && !statusMatches(nodeById[e.source]?.status) && !statusMatches(nodeById[e.target]?.status)) return false;
-    if(!expanded && (DATA.groups || []).length && e.category !== 'contains' && !isSkeletonReport) return false;
-    if(visibleCategories.has('all')) return true;
-    return visibleCategories.has(e.category);
-  });
-  return {nodes, nodeIds, edges};
-}
-function visibleData(){
-  const key = visibleCacheKey();
-  if(!visibleCache || visibleCache.key !== key){
-    visibleCache = {key, ...computeVisibleData()};
+
+/* ---------------------------------------------------------------------
+   Dependency-free layered layout (no dagre / no CDN - this tool runs fully
+   offline). Ranks units by longest-path from sources (Kahn's algorithm),
+   then packs each rank perpendicular to the flow direction.
+   ------------------------------------------------------------------- */
+function layeredLayout(nodeList, edgeList, opts){
+  const dir = opts.dir || 'TB';
+  const rankGap = opts.rankGap ?? 70;
+  const nodeGap = opts.nodeGap ?? 14;
+  const byId = Object.fromEntries(nodeList.map(n => [n.id, n]));
+  const outgoing = {}, indeg = {};
+  nodeList.forEach(n => { outgoing[n.id] = []; indeg[n.id] = 0; });
+  for(const e of edgeList){
+    if(!byId[e.source] || !byId[e.target] || e.source === e.target) continue;
+    outgoing[e.source].push(e.target);
+    indeg[e.target] += 1;
   }
-  return visibleCache;
-}
-function visibleNodes(){ return visibleData().nodes; }
-function visibleEdges(){ return visibleData().edges; }
-function rankedPositions(nodes, edges){
-  const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
-  const indegree = Object.fromEntries(nodes.map(n => [n.id, 0]));
-  const outgoing = Object.fromEntries(nodes.map(n => [n.id, []]));
-  for(const e of edges){
-    if(byId[e.source] && byId[e.target]){
-      outgoing[e.source].push(e.target);
-      indegree[e.target] = (indegree[e.target] || 0) + 1;
+  const rank = {};
+  nodeList.forEach(n => { rank[n.id] = 0; });
+  const indegRemaining = {...indeg};
+  let queue = nodeList.filter(n => indegRemaining[n.id] === 0).map(n => n.id).sort();
+  const settled = new Set(queue);
+  while(queue.length){
+    const id = queue.shift();
+    for(const t of outgoing[id]){
+      rank[t] = Math.max(rank[t], rank[id] + 1);
+      indegRemaining[t] -= 1;
+      if(indegRemaining[t] <= 0 && !settled.has(t)){ settled.add(t); queue.push(t); }
     }
   }
-  const q = nodes.filter(n => !indegree[n.id]).sort((a,b)=>a.id.localeCompare(b.id)).map(n=>n.id);
-  const rank = Object.fromEntries(nodes.map(n => [n.id, 0]));
-  const seen = new Set(q);
-  while(q.length){
-    const id = q.shift();
-    for(const t of outgoing[id] || []){
-      rank[t] = Math.max(rank[t] || 0, (rank[id] || 0) + 1);
-      indegree[t] -= 1;
-      if(indegree[t] <= 0 && !seen.has(t)){ seen.add(t); q.push(t); }
-    }
-  }
+  // Any node left unsettled sits on a cycle; keep it at rank 0 rather than looping forever.
   const buckets = {};
-  for(const n of nodes){ (buckets[rank[n.id] || 0] ||= []).push(n); }
+  nodeList.forEach(n => { (buckets[rank[n.id]] ||= []).push(n); });
+  const rankKeys = Object.keys(buckets).map(Number).sort((a,b) => a - b);
   const positions = {};
-  const layerGap = expanded ? 240 : 190;
-  const nodeGap = expanded ? 92 : 78;
-  Object.keys(buckets).map(Number).sort((a,b)=>a-b).forEach(r => {
-    buckets[r]
-      .sort((a,b)=>(a.group||a.parent||'').localeCompare(b.group||b.parent||'') || a.id.localeCompare(b.id))
-      .forEach((n,i) => {
-        positions[n.id] = direction === 'LR'
-          ? {x:r*layerGap, y:i*nodeGap}
-          : {x:i*nodeGap*1.7, y:r*layerGap*.78};
-      });
+  let cursorMain = 0;
+  rankKeys.forEach(r => {
+    const bucket = buckets[r].slice().sort((a,b) => String(a.sortKey||a.id).localeCompare(String(b.sortKey||b.id)));
+    const mainSize = Math.max(...bucket.map(n => dir === 'TB' ? n.h : n.w));
+    const totalCross = bucket.reduce((sum,n) => sum + (dir === 'TB' ? n.w : n.h), 0) + nodeGap * Math.max(0, bucket.length - 1);
+    let crossCursor = -totalCross / 2;
+    bucket.forEach(n => {
+      const crossSize = dir === 'TB' ? n.w : n.h;
+      const crossCenter = crossCursor + crossSize / 2;
+      positions[n.id] = dir === 'TB'
+        ? { x: crossCenter, y: cursorMain + mainSize / 2 }
+        : { x: cursorMain + mainSize / 2, y: crossCenter };
+      crossCursor += crossSize + nodeGap;
+    });
+    cursorMain += mainSize + rankGap;
   });
-  return positions;
-}
-function toCytoscapeElements(){
-  // Single visibleData() call: nodes, the node-id membership Set, and edges
-  // are all derived from one cached computation instead of visibleNodes()
-  // and visibleEdges() each re-deriving their own node-id set (perf task 10).
-  const {nodes, nodeIds, edges} = visibleData();
-  const isLarge = (nodes.length + edges.length) > LARGE_GRAPH_ELEMENT_THRESHOLD;
-  const cyNodes = nodes.map(n => {
-    const data = {
-      ...n,
-      label: text(label(n), n.type === 'group' ? 22 : 18),
-      fullLabel: label(n),
-      color: statusColor(n.status) || kindColor(n.kind),
-      borderColor: statusColor(n.status) || '#fff'
-    };
-    const parent = expanded ? (n.parent || n.group) : null;
-    if(parent && nodeIds.has(parent)) data.parent = parent;
-    return {group:'nodes', data, classes:`${n.type} ${n.external ? 'external' : ''} ${isProblemStatus(n.status) ? 'problem' : ''} ${isLarge ? 'lg' : ''}`};
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  nodeList.forEach(n => {
+    const p = positions[n.id];
+    minX = Math.min(minX, p.x - n.w / 2); maxX = Math.max(maxX, p.x + n.w / 2);
+    minY = Math.min(minY, p.y - n.h / 2); maxY = Math.max(maxY, p.y + n.h / 2);
   });
-  const cyEdges = edges.map(e => ({
-    group:'edges',
-    data:{...e, label:text((e.predicate === 'SUCCESS' && !e.qualifier) ? '' : (e.label || e.relation), 24), color:edgeColor(e.category, e.status, e.predicate)},
-    classes:`${e.category || 'other'} ${e.or_group !== null && e.or_group !== undefined ? 'or-group' : ''} ${e.predicate && e.predicate !== 'SUCCESS' ? 'non-success' : ''} ${isProblemStatus(e.status) ? 'problem' : ''} ${isLarge ? 'lg' : ''}`
-  }));
-  return {nodes, edges, elements:[...cyNodes, ...cyEdges], isLarge};
+  if(!nodeList.length){ minX = minY = maxX = maxY = 0; }
+  nodeList.forEach(n => { positions[n.id].x -= minX; positions[n.id].y -= minY; });
+  return { positions, width: maxX - minX, height: maxY - minY };
 }
-function layoutOptions(nodes, edges){
-  const positions = rankedPositions(nodes, edges);
-  return {
-    name:'preset',
-    positions: node => positions[node.id()] || {x:0, y:0},
-    fit:true,
-    padding:45,
-    animate:false
+
+/* ---------------------------------------------------------------------
+   Recursive visibility + layout. Everything starts collapsed
+   (expandedGroups empty); expanding a container reveals its direct
+   children (jobs and/or nested container chips) - this generalizes the
+   two-level "domain -> box" example to arbitrary container nesting depth.
+   ------------------------------------------------------------------- */
+const JOB_SIZE = { w: 150, h: 24 };
+const CHIP_SIZE = { w: 200, h: 48 };
+const GROUP_PAD = { l: 20, r: 20, t: 38, b: 16 };
+
+let expandedGroups = new Set();
+let direction = 'TB';
+let groupLayoutCache = {};
+
+function resolveToUnit(id, unitIds, boundaryGroupId){
+  let current = id;
+  while(current !== null && current !== undefined){
+    if(unitIds.has(current)) return current;
+    if(groupById[current] && unitIds.has('box:' + current)) return 'box:' + current;
+    if(current === boundaryGroupId) return null;
+    current = parentOf(current);
+  }
+  return null;
+}
+
+// Candidate edges for laying out one group's direct children. At root scope
+// every edge is a candidate (any edge could resolve up to a top-level chip),
+// but for a nested group we only need edges that touch a job somewhere in
+// that group's own subtree - looking those up via outEdges/inEdges keeps
+// layoutOf() from re-scanning the full edge list once per expanded group
+// (O(edges touching the subtree) instead of O(total edges) per group).
+function localEdgeCandidates(groupId){
+  if(groupId === null) return DATA.edges || [];
+  const seen = new Set();
+  const result = [];
+  for(const jid of descendantJobs(groupId)){
+    for(const e of (outEdges[jid] || [])) if(!seen.has(e.id)){ seen.add(e.id); result.push(e); }
+    for(const e of (inEdges[jid] || [])) if(!seen.has(e.id)){ seen.add(e.id); result.push(e); }
+  }
+  return result;
+}
+function layoutOf(groupId){
+  const cacheKey = groupId === null ? '\0root' : groupId;
+  if(groupLayoutCache[cacheKey]) return groupLayoutCache[cacheKey];
+  const childUnits = [];
+  for(const sub of directChildGroups(groupId).slice().sort()){
+    const g = groupById[sub];
+    if(!nodeMatchesCurrentStatus(g)) continue;
+    if(expandedGroups.has(sub)){
+      const sz = layoutOf(sub).size;
+      childUnits.push({ id: sub, kind: 'group', groupId: sub, w: sz.w, h: sz.h, sortKey: sub });
+    } else {
+      childUnits.push({ id: 'box:' + sub, kind: 'box', groupId: sub, w: CHIP_SIZE.w, h: CHIP_SIZE.h, sortKey: sub });
+    }
+  }
+  for(const jid of directChildJobs(groupId).slice().sort()){
+    const j = jobById[jid];
+    if(!nodeMatchesCurrentStatus(j)) continue;
+    childUnits.push({ id: jid, kind: 'job', groupId: null, w: JOB_SIZE.w, h: JOB_SIZE.h, sortKey: jid });
+  }
+  const unitIds = new Set(childUnits.map(u => u.id));
+  const seenPairs = new Set();
+  const localEdges = [];
+  for(const e of localEdgeCandidates(groupId)){
+    if(!edgeStatusPasses(e)) continue;
+    const s = resolveToUnit(e.source, unitIds, groupId);
+    const t = resolveToUnit(e.target, unitIds, groupId);
+    if(!s || !t || s === t) continue;
+    const key = s + '>>' + t;
+    if(seenPairs.has(key)) continue;
+    seenPairs.add(key);
+    localEdges.push({ source: s, target: t });
+  }
+  const isRoot = groupId === null;
+  const { positions, width, height } = layeredLayout(childUnits, localEdges, {
+    dir: direction,
+    rankGap: isRoot ? 110 : 64,
+    nodeGap: isRoot ? 30 : 14,
+  });
+  const pad = isRoot ? { l: 0, r: 0, t: 0, b: 0 } : GROUP_PAD;
+  const size = { w: width + pad.l + pad.r, h: height + pad.t + pad.b };
+  const relPositions = {};
+  for(const u of childUnits) relPositions[u.id] = { x: positions[u.id].x + pad.l, y: positions[u.id].y + pad.t };
+  const result = { size, relPositions, childUnits };
+  groupLayoutCache[cacheKey] = result;
+  return result;
+}
+
+function buildVisible(){
+  groupLayoutCache = {};
+  const root = layoutOf(null);
+  const elements = [];
+  const positions = {};
+  const jobIds = new Set(), boxIds = new Set(), groupIds = new Set();
+
+  function place(unit, parentId, cx, cy){
+    positions[unit.id] = { x: cx, y: cy };
+    if(unit.kind === 'job'){
+      jobIds.add(unit.id);
+      elements.push(makeJobElement(unit.id, parentId));
+    } else if(unit.kind === 'box'){
+      boxIds.add(unit.id);
+      elements.push(makeBoxElement(unit.id, unit.groupId, parentId));
+    } else {
+      groupIds.add(unit.groupId);
+      elements.push(makeGroupElement(unit.groupId, parentId));
+      const layout = layoutOf(unit.groupId);
+      const topLeftX = cx - layout.size.w / 2, topLeftY = cy - layout.size.h / 2;
+      for(const child of layout.childUnits){
+        const rel = layout.relPositions[child.id];
+        place(child, unit.groupId, topLeftX + rel.x, topLeftY + rel.y);
+      }
+    }
+  }
+  for(const unit of root.childUnits){
+    const p = root.relPositions[unit.id];
+    place(unit, null, p.x, p.y);
+  }
+
+  const endpointIds = new Set([...jobIds, ...boxIds]);
+  const merged = new Map();
+  for(const e of DATA.edges || []){
+    if(!edgeStatusPasses(e)) continue;
+    const s = resolveToUnit(e.source, endpointIds, null);
+    const t = resolveToUnit(e.target, endpointIds, null);
+    if(!s || !t || s === t) continue;
+    const key = s + '>>' + t;
+    let bucket = merged.get(key);
+    if(!bucket){ bucket = { source: s, target: t, edges: [] }; merged.set(key, bucket); }
+    bucket.edges.push(e);
+  }
+  const edgeElements = [];
+  for(const [key, bucket] of merged) edgeElements.push(makeEdgeElement(key, bucket));
+
+  return { elements: [...elements, ...edgeElements], positions, jobIds, boxIds, groupIds, endpointIds };
+}
+
+/* ---------------------------------------------------------------------
+   Cytoscape element builders
+   ------------------------------------------------------------------- */
+function makeJobElement(id, parentId){
+  const j = jobById[id];
+  const dom = colorFor(id);
+  const st = statusColor(j.status);
+  const data = {
+    id, kind: 'job', label: text(label(j), 16), fullLabel: label(j), group: j.group,
+    watcher: !!j.watcher, color: dom, borderColor: st || '#fff', status: j.status || '',
   };
+  if(parentId) data.parent = parentId;
+  return { group: 'nodes', data, classes: `job ${j.watcher ? 'watcher' : ''} ${isProblemStatus(j.status) ? 'problem' : ''}`.trim() };
 }
-function buildCy(){
-  const graph = toCytoscapeElements();
-  if(cy) cy.destroy();
-  cy = window.cytoscape({
-    container:$('cy'),
-    elements:graph.elements,
-    layout:layoutOptions(graph.nodes, graph.edges),
-    wheelSensitivity:0.18,
-    minZoom:0.08,
-    maxZoom:3.5,
-    // Node-count-gated performance options (task 10): below the threshold
-    // these are all false/default, so small graphs render pixel-identical to
-    // before. Above it, viewport-only rendering during pan/zoom keeps
-    // thousands of elements interactive; nothing in DATA is ever omitted,
-    // only deferred during motion.
-    hideEdgesOnViewport: graph.isLarge,
-    textureOnViewport: graph.isLarge,
-    motionBlur: !graph.isLarge,
-    style:[
-      {selector:'node', style:{'background-color':'data(color)','border-color':'data(borderColor)','border-width':2,'label':'data(label)','color':'#fff','font-size':11,'font-weight':700,'text-valign':'center','text-halign':'center','text-wrap':'wrap','text-max-width':112,'text-outline-color':'data(color)','text-outline-width':2}},
-      {selector:'node.group', style:{'shape':'round-rectangle','width':128,'height':58,'background-opacity':0.9,'padding':'18px','text-max-width':116}},
-      {selector:'node.job', style:{'shape':'ellipse','width':54,'height':54,'text-max-width':70}},
-      {selector:'node.external', style:{'background-opacity':0.22,'border-style':'dotted','border-color':'#94a3b8','color':'#475569','text-outline-width':0}},
-      {selector:':parent', style:{'background-opacity':0.12,'border-width':2,'border-style':'dashed','text-valign':'top','text-margin-y':-6,'color':'#334155','text-outline-width':0}},
-      {selector:'edge', style:{'width':2,'line-color':'data(color)','target-arrow-color':'data(color)','target-arrow-shape':'triangle','curve-style':'bezier','label':'data(label)','font-size':9,'color':'#475569','text-background-color':'#fff','text-background-opacity':0.75,'text-background-padding':2,'text-rotation':'autorotate'}},
-      {selector:'edge.non-success', style:{'width':3,'color':'#991b1b','font-weight':700}},
-      {selector:'edge.or-group', style:{'line-style':'dashed'}},
-      // Cheaper rendering above the size threshold (task 10): straight
-      // (haystack) edges instead of bezier curves, and no per-node text
-      // outline. Labels stay visible on both nodes and edges either way.
-      {selector:'node.lg', style:{'text-outline-width':0}},
-      {selector:'edge.lg', style:{'curve-style':'haystack'}},
-      {selector:'.highlight', style:{'z-index':999,'border-width':5,'width':4,'opacity':1}},
-      {selector:'edge.highlight, edge:selected', style:{'curve-style':'bezier'}},
-      {selector:'.faded', style:{'opacity':0.16}},
-      {selector:':selected', style:{'border-color':'#111827','border-width':4,'line-color':'#111827','target-arrow-color':'#111827'}}
-    ]
+function makeBoxElement(id, groupId, parentId){
+  const g = groupById[groupId];
+  const jobs = descendantJobs(groupId);
+  const count = jobs.length;
+  const watcherCount = jobs.filter(jid => jobById[jid]?.watcher).length;
+  const dom = colorFor(groupId);
+  const suffix = watcherCount ? ` (${watcherCount} fw)` : '';
+  const data = {
+    id, kind: 'box', groupId, label: text(`${label(g)} · ${count}${suffix}`, 30), fullLabel: label(g),
+    color: dom, borderColor: statusColor(g.status) || dom, status: g.status || '', count, watcherCount,
+  };
+  if(parentId) data.parent = parentId;
+  return { group: 'nodes', data, classes: `box ${isProblemStatus(g.status) ? 'problem' : ''}`.trim() };
+}
+function makeGroupElement(groupId, parentId){
+  const g = groupById[groupId];
+  const dom = colorFor(groupId);
+  const data = {
+    id: groupId, kind: 'group', groupId, label: text(label(g), 26), fullLabel: label(g),
+    color: dom, borderColor: statusColor(g.status) || dom, status: g.status || '',
+  };
+  if(parentId) data.parent = parentId;
+  return { group: 'nodes', data, classes: `group ${isProblemStatus(g.status) ? 'problem' : ''}`.trim() };
+}
+function makeEdgeElement(key, bucket){
+  const worst = worstEdgeStatus(bucket.edges);
+  const nonSuccess = bucket.edges.some(e => e.predicate && e.predicate !== 'SUCCESS');
+  const color = statusColor(worst) || (isSkeletonReport && nonSuccess ? '#be123c' : '#b8c0cb');
+  const data = {
+    id: key, source: bucket.source, target: bucket.target, color, status: worst || '',
+    count: bucket.edges.length, label: bucket.edges.length > 1 ? String(bucket.edges.length) : '',
+    refIds: bucket.edges.map(e => e.id),
+  };
+  return { group: 'edges', data, classes: `dep ${isProblemStatus(worst) ? 'problem' : ''} ${nonSuccess ? 'non-success' : ''}`.trim() };
+}
+
+/* ---------------------------------------------------------------------
+   Cytoscape instance
+   ------------------------------------------------------------------- */
+// Above this many rendered elements, Cytoscape's own large-graph rendering
+// mode kicks in (viewport-only edge/texture rendering instead of redrawing
+// everything on every pan/zoom frame). These are constructor-only options -
+// they can't be flipped on an existing instance, only chosen when creating one.
+const LARGE_GRAPH_ELEMENT_THRESHOLD = 1500;
+let cy = null;
+let lastBuild = null;
+let lastRenderModeLarge = false;
+
+function createCy(elements, large){
+  return window.cytoscape({
+    container: $('cy'),
+    elements,
+    layout: { name: 'preset', positions: n => lastBuild.positions[n.id()] || { x: 0, y: 0 }, fit: false, padding: 40, animate: false },
+    wheelSensitivity: 0.2,
+    minZoom: 0.05,
+    maxZoom: 3,
+    hideEdgesOnViewport: large,
+    textureOnViewport: large,
+    motionBlur: !large,
+    style: [
+      { selector: 'node[kind="job"]', style: {
+          'background-color': 'data(color)', 'border-width': 2, 'border-color': 'data(borderColor)',
+          'width': 14, 'height': 14, 'shape': 'ellipse',
+          'label': 'data(label)', 'font-size': 9, 'color': '#3a4450',
+          'text-valign': 'center', 'text-halign': 'right', 'text-margin-x': 4, 'text-max-width': 120 } },
+      { selector: 'node[kind="job"].watcher', style: {
+          'shape': 'diamond', 'width': 16, 'height': 16, 'border-width': 2.5, 'border-color': '#0ca678' } },
+      { selector: 'node[kind="box"]', style: {
+          'shape': 'round-rectangle', 'background-color': 'data(color)', 'background-opacity': 0.16,
+          'border-width': 1.5, 'border-color': 'data(borderColor)',
+          'label': 'data(label)', 'font-size': 11.5, 'font-weight': 600, 'color': '#33404d',
+          'text-valign': 'center', 'text-halign': 'center', 'text-max-width': 170,
+          'width': 200, 'height': 46, 'padding': 6 } },
+      { selector: 'node[kind="group"]', style: {
+          'shape': 'round-rectangle', 'background-color': 'data(color)', 'background-opacity': 0.07,
+          'border-width': 1.5, 'border-color': 'data(borderColor)', 'border-opacity': 0.6, 'border-style': 'dashed',
+          'label': 'data(label)', 'font-size': 12, 'font-weight': 700, 'color': '#33404d',
+          'text-valign': 'top', 'text-halign': 'center', 'text-margin-y': 6, 'padding': 16 } },
+      { selector: 'edge.dep', style: {
+          'width': 1, 'line-color': 'data(color)', 'target-arrow-color': 'data(color)', 'target-arrow-shape': 'triangle',
+          'arrow-scale': 0.85, 'curve-style': 'bezier', 'opacity': 0.8, 'label': 'data(label)',
+          'font-size': 9, 'color': '#475569', 'text-background-color': '#fff', 'text-background-opacity': 0.8, 'text-background-padding': 1 } },
+      { selector: 'edge.dep.non-success', style: { 'width': 2, 'line-style': 'dashed' } },
+      { selector: 'edge.dep.problem', style: { 'width': 2.2, 'opacity': 1 } },
+      { selector: 'node.problem', style: { 'border-width': 3 } },
+      { selector: 'node.sel', style: { 'border-width': 3.5, 'border-color': '#1f2730', 'font-weight': 700, 'color': '#000', 'z-index': 60 } },
+      { selector: 'node.up', style: { 'border-width': 3.5, 'border-color': '#e8590c', 'color': '#b34700', 'font-weight': 600, 'z-index': 50 } },
+      { selector: 'node.down', style: { 'border-width': 3.5, 'border-color': '#2f9e44', 'color': '#1d6e2f', 'font-weight': 600, 'z-index': 50 } },
+      { selector: 'node.match', style: { 'border-width': 3.5, 'border-color': '#1c7ed6', 'z-index': 50 } },
+      { selector: 'edge.up', style: { 'line-color': '#e8590c', 'target-arrow-color': '#e8590c', 'width': 2.4, 'opacity': 1, 'z-index': 50 } },
+      { selector: 'edge.down', style: { 'line-color': '#2f9e44', 'target-arrow-color': '#2f9e44', 'width': 2.4, 'opacity': 1, 'z-index': 50 } },
+      { selector: 'edge:selected', style: { 'line-color': '#111827', 'target-arrow-color': '#111827', 'width': 2.6, 'curve-style': 'bezier', 'z-index': 55 } },
+    ],
   });
-  cy.on('tap', 'node', ev => selectNode(ev.target.id()));
+}
+function bindCyEvents(){
+  cy.on('tap', 'node[kind="job"]', ev => focusJob(ev.target.id()));
+  cy.on('tap', 'node[kind="box"]', ev => expandBoxPath(ev.target.data('groupId')));
+  cy.on('tap', 'node[kind="group"]', ev => collapseGroup(ev.target.data('groupId')));
   cy.on('tap', 'edge', ev => selectEdge(ev.target.id()));
   cy.on('tap', ev => { if(ev.target === cy) clearSelection(); });
-  updateCounts();
-  applyClasses();
 }
-function relayout(){
-  const graph = toCytoscapeElements();
-  // Batch the teardown+rebuild of the element set (task 10): cy.batch defers
-  // style/layout recalculation until the whole block finishes instead of
-  // reacting to the remove() and each add() separately.
-  cy.batch(() => {
-    cy.elements().remove();
-    cy.add(graph.elements);
-  });
-  cy.layout(layoutOptions(graph.nodes, graph.edges)).run();
-  cy.fit(undefined, 45);
-  updateCounts();
-  applyClasses();
+function buildCy(opts){
+  opts = opts || {};
+  lastBuild = buildVisible();
+  const large = lastBuild.elements.length > LARGE_GRAPH_ELEMENT_THRESHOLD;
+  if(!cy || large !== lastRenderModeLarge){
+    // First build, or crossing the large-graph rendering-mode threshold
+    // (hideEdgesOnViewport/textureOnViewport/motionBlur are constructor-only
+    // in Cytoscape) - only these two cases need a full destroy+recreate.
+    if(cy) cy.destroy();
+    cy = createCy(lastBuild.elements, large);
+    bindCyEvents();
+    lastRenderModeLarge = large;
+  } else {
+    // Same rendering mode as last time: diff instead of rebuilding from
+    // scratch. Most clicks (expand one box, focus one job, toggle direction)
+    // only actually change a small slice of a large graph's elements - the
+    // rest just need their position refreshed, not to be torn down and
+    // recreated, which is both slower and (for pan/zoom) more jarring.
+    const nextById = new Map(lastBuild.elements.map(el => [el.data.id, el]));
+    const prevEls = cy.elements();
+    const addDefs = [];
+    const repositionEls = [];
+    const staleIds = new Set();
+    nextById.forEach((def, id) => {
+      const existing = cy.getElementById(id);
+      if(!existing.length){ addDefs.push(def); return; }
+      if(JSON.stringify(existing.data()) === JSON.stringify(def.data)){ repositionEls.push(existing); }
+      else { staleIds.add(id); addDefs.push(def); }
+    });
+    const removeColl = prevEls.filter(el => !nextById.has(el.id()) || staleIds.has(el.id()));
+    cy.batch(() => {
+      if(removeColl.length) cy.remove(removeColl);
+      if(addDefs.length) cy.add(addDefs);
+      repositionEls.forEach(el => {
+        const pos = lastBuild.positions[el.id()];
+        if(pos) el.position(pos);
+      });
+    });
+  }
+  if(!opts.skipFit) cy.fit(undefined, 40);
+  updateStats();
+  updateCrumb();
 }
-function updateCounts(){
-  const nodes = visibleNodes();
-  $('nGroups').textContent = nodes.filter(n => n.type === 'group').length;
-  $('nJobs').textContent = nodes.filter(n => n.type !== 'group').length;
-  $('nEdges').textContent = visibleEdges().length;
+// Fit the viewport to specific ids (resolved to whatever is currently visible
+// for each - a job, a collapsed box chip, or an expanded group) instead of
+// the whole graph. Used after interactive drill-down so the zoom level stays
+// close to where the user already was, rather than snapping back out to fit
+// every object on screen.
+function fitToVisible(ids, padding){
+  if(!cy || !lastBuild) return;
+  let collection = null;
+  for(const id of ids){
+    const vis = resolveToUnit(id, lastBuild.endpointIds, null) || (lastBuild.groupIds.has(id) ? id : null);
+    if(!vis) continue;
+    const ele = cy.getElementById(vis);
+    if(!ele || !ele.length) continue;
+    collection = collection ? collection.union(ele) : ele;
+  }
+  if(collection) cy.fit(collection, padding || 70);
+  else cy.fit(undefined, 40);
 }
-function applyClasses(){
+function zoomBy(factor){
   if(!cy) return;
-  cy.elements().removeClass('highlight faded');
-  for(const id of highlighted){ const ele = cy.getElementById(id); if(ele.length) ele.addClass('highlight'); }
-  for(const id of faded){ const ele = cy.getElementById(id); if(ele.length) ele.addClass('faded'); }
+  const target = Math.max(cy.minZoom(), Math.min(cy.maxZoom(), cy.zoom() * factor));
+  cy.zoom({ level: target, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
 }
-function fit(){
-  updateCounts();
-  if(cy) cy.fit(undefined, 45);
+
+/* ---------------------------------------------------------------------
+   Up/down adjacency (from job.depends_on, independent of collapse state)
+   ------------------------------------------------------------------- */
+const upOf = {}, downOf = {};
+for(const j of DATA.jobs || []) upOf[j.id] = (j.depends_on || []).slice();
+for(const j of DATA.jobs || []) for(const d of (j.depends_on || [])) (downOf[d] ||= []).push(j.id);
+function chainSize(id, adj){
+  const seen = new Set(); const q = [id];
+  while(q.length){ const n = q.shift(); for(const m of (adj[n] || [])) if(!seen.has(m)){ seen.add(m); q.push(m); } }
+  return seen.size;
 }
-function edgeLabel(e){ return `${e.source} -> ${e.relation || e.predicate} -> ${e.target}`; }
-function evidenceSummary(e){
-  const orText = e.or_group !== null && e.or_group !== undefined ? `any of ${e.or_group}` : '';
-  return [e.status, e.side, e.category, e.predicate, e.qualifier, orText, e.evidence_file, e.evidence_key, e.evidence_path].filter(Boolean).join(' | ');
+
+/* ---------------------------------------------------------------------
+   Navigation: drill-down expand/collapse + selection highlighting
+   ------------------------------------------------------------------- */
+function ancestorChainInclusive(groupId){ return [...ancestorChain(groupId), groupId]; }
+function expandBoxPath(groupId){
+  expandedGroups = new Set(ancestorChainInclusive(groupId));
+  buildCy({ skipFit: true });
+  clearHighlightClasses();
+  const linked = linkedGroups(groupId);
+  for(const g of linked) markMatchIfVisible(g);
+  fitToVisible([groupId, ...linked], 80);
+  showGroupPanel(groupId);
 }
-function bindPanelActions(){
-  $('pBody').querySelectorAll('[data-node]').forEach(el => el.addEventListener('click', ev => { ev.stopPropagation(); const target=el.getAttribute('data-node'); if(target) selectNode(target); }));
-  $('pBody').querySelectorAll('[data-edge]').forEach(el => el.addEventListener('click', ev => { ev.stopPropagation(); const target=el.getAttribute('data-edge'); if(target) selectEdge(target); }));
-  $('pBody').querySelectorAll('[data-copy]').forEach(el => el.addEventListener('click', ev => { ev.stopPropagation(); copyText(el.getAttribute('data-copy')); el.textContent='Copied'; setTimeout(()=>{ el.textContent='Copy'; }, 900); }));
+function collapseGroup(groupId){
+  expandedGroups = new Set(ancestorChain(groupId));
+  buildCy({ skipFit: true });
+  clearHighlightClasses();
+  const anchor = groupById[groupId]?.parent;
+  fitToVisible(anchor ? [anchor] : [groupId], 100);
+  showGroupPanel(groupId);
 }
-function statusRows(){
-  const statuses = DATA.metadata?.statuses || {};
-  const entries = Object.entries(statuses);
-  if(!entries.length) return '<div class="placeholder">No comparison statuses in this source graph.</div>';
-  return '<div class="status-grid">' + entries.map(([k,v]) => `<span class="status-chip"><i class="sw" style="background:${statusColor(k) || '#868e96'}"></i>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b>`).join('') + '</div>';
+function linkedGroups(groupId){
+  const jobs = new Set(descendantJobs(groupId));
+  const linked = new Set();
+  for(const jid of jobs){
+    for(const d of (upOf[jid] || [])) { const g = jobById[d]?.group; if(g && g !== groupId) linked.add(g); }
+    for(const d of (downOf[jid] || [])) { const g = jobById[d]?.group; if(g && g !== groupId) linked.add(g); }
+  }
+  return linked;
 }
-function visibleSummaryRows(){
-  return metaRows({
-    status_filter: activeStatusFilter,
-    relation_filter: [...visibleCategories].join(','),
-    visible_nodes: visibleNodes().length,
-    visible_edges: visibleEdges().length,
-    expanded_groups: expanded
+function markMatchIfVisible(groupId){
+  const vis = resolveToUnit(groupId, lastBuild.endpointIds, null) || (lastBuild.groupIds.has(groupId) ? groupId : null);
+  if(vis) cy.getElementById(vis).addClass('match');
+}
+function focusJob(jobId){
+  expandedGroups = new Set(ancestorChain(jobId));
+  buildCy({ skipFit: true });
+  clearHighlightClasses();
+  cy.getElementById(jobId).addClass('sel');
+  for(const d of (upOf[jobId] || [])){
+    const vis = resolveToUnit(d, lastBuild.endpointIds, null);
+    if(vis){ cy.getElementById(vis).addClass('up'); }
+  }
+  for(const d of (downOf[jobId] || [])){
+    const vis = resolveToUnit(d, lastBuild.endpointIds, null);
+    if(vis){ cy.getElementById(vis).addClass('down'); }
+  }
+  cy.edges().forEach(edge => {
+    if(edge.source().hasClass('up') && edge.target().id() === jobId) edge.addClass('up');
+    if(edge.target().hasClass('down') && edge.source().id() === jobId) edge.addClass('down');
   });
+  fitToVisible([jobId, ...(upOf[jobId] || []), ...(downOf[jobId] || [])], 90);
+  showJobPanel(jobId);
 }
-function showOverview(){
-  $('pTitle').textContent = 'Overview';
-  $('pSub').textContent = `${DATA.metadata?.source_system || ''} ${DATA.metadata?.env || ''}`;
-  const cats = DATA.metadata?.relation_categories || {};
-  $('pBody').innerHTML =
-    `<div class="section">Current view</div>${visibleSummaryRows()}` +
-    `<div class="section">Graph</div>${metaRows(DATA.metadata)}` +
-    `<div class="section">Status counts</div>${statusRows()}` +
-    `<div class="section">Relation categories</div>` +
-    Object.entries(cats).map(([k,v]) => `<div class="kv"><span>${escapeHtml(k)}</span><span>${escapeHtml(v)}</span></div>`).join('') +
-    `<div class="section">Legend</div>` +
-    `<div class="legend"><span><i class="sw" style="background:#2f9e44"></i>matched</span><span></span><span><i class="sw" style="background:#e03131"></i>missing in Stonebranch</span><span></span><span><i class="sw" style="background:#1c7ed6"></i>missing in JIL</span><span></span><span><i class="sw" style="background:#f08c00"></i>syntax/condition diff</span><span></span><span><i class="sw" style="background:#862e9c"></i>collision</span><span></span></div>` +
-    `<div class="section">Large graph tips</div>` +
-    `<p class="placeholder">Use Problems, Critical, Missing, status filters, and relation filters before expanding all groups. This HTML report is offline and self-contained with a bundled Cytoscape.js runtime.</p>`;
+function selectEdge(edgeVisualId){
+  const ele = cy.getElementById(edgeVisualId);
+  if(!ele || !ele.length) return;
+  clearHighlightClasses();
+  cy.elements().unselect();
+  ele.select();
+  ele.source().addClass('sel');
+  ele.target().addClass('sel');
+  showEdgePanel(edgeVisualId);
 }
-let currentNode = null;
-function clickableEdgeList(title, edges){
-  return `<div class="section">${title} <span class="pill">${edges.length}</span></div>` + (edges.length ? edges.slice(0,80).map(e => {
-    const other = e.source === currentNode ? e.target : e.source;
-    const arrow = e.source === currentNode ? '->' : '<-';
-    return `<div class="edge-card"><div class="edge-main" data-edge="${escapeHtml(e.id)}"><span>${escapeHtml(e.label || e.relation || e.predicate)}</span><span>${arrow}</span><b>${escapeHtml(other)}</b></div><div class="edge-meta">${escapeHtml(evidenceSummary(e))}</div><div class="copy-row">${copyButton(edgeLabel(e), 'Copy edge')}<button class="copy-btn" data-node="${escapeHtml(other)}">Open node</button></div></div>`;
-  }).join('') : '<div class="placeholder">None</div>');
-}
-function showNode(id){
-  currentNode = id;
-  const node = nodeById[id]; if(!node) return;
-  $('pTitle').textContent = label(node);
-  $('pSub').textContent = `${node.kind || 'node'} | ${id}`;
-  const outgoing = outEdges[id] || [], incoming = inEdges[id] || [];
-  $('pBody').innerHTML =
-    `<div class="section">Identity</div><div class="copy-row">${copyable(id)} ${copyButton(id, 'Copy ID')}</div>` +
-    `${node.graph_id ? `<div class="copy-row">${copyable(node.graph_id)} ${copyButton(node.graph_id, 'Copy graph ID')}</div>` : ''}` +
-    `<div class="section">Details</div>` +
-    `${metaRows({status:node.status, side:node.side, kind:node.kind, original_kind:node.original_kind, group:node.group, parent:node.parent, canonical_key:node.canonical_key, source_file:node.source_file, synthetic:node.synthetic, external:node.external, plumbing_erased_count:node.plumbing_erased_count})}` +
-    `${node.trigger ? `<div class="section">Trigger</div><div class="copy-row">${copyable(node.trigger)} ${copyButton(node.trigger, 'Copy trigger')}</div>` : ''}` +
-    `${node.status === 'changed' ? `<div class="section">Trigger diff</div>${metaRows({stonebranch:node.sb_trigger, jil:node.jil_trigger, reasons:(node.diff_reasons || []).join(', ')})}` : ''}` +
-    `${node.meta ? `<div class="section">Meta</div>${metaRows(node.meta)}` : ''}` +
-    `${clickableEdgeList('Outgoing', outgoing)}${clickableEdgeList('Incoming', incoming)}`;
-  bindPanelActions();
-}
-function showEdge(edgeId){
-  const e = edgeById[edgeId]; if(!e) return;
-  $('pTitle').textContent = e.label || e.relation || e.predicate || 'Edge';
-  $('pSub').textContent = `${e.source} -> ${e.target}`;
-  $('pBody').innerHTML =
-    `<div class="section">Edge identity</div><div class="copy-row">${copyable(edgeLabel(e))} ${copyButton(edgeLabel(e), 'Copy edge')}</div>` +
-    `${e.graph_edge_id ? `<div class="copy-row">${copyable(e.graph_edge_id)} ${copyButton(e.graph_edge_id, 'Copy graph edge ID')}</div>` : ''}` +
-    `<div class="section">Endpoints</div>` +
-    `<div class="kv"><span>Source</span><span><span class="linkish" data-node="${escapeHtml(e.source)}">${escapeHtml(e.source)}</span></span></div>` +
-    `<div class="kv"><span>Target</span><span><span class="linkish" data-node="${escapeHtml(e.target)}">${escapeHtml(e.target)}</span></span></div>` +
-    `<div class="section">Evidence</div>` +
-    `${metaRows({status:e.status, side:e.side, relation:e.relation, category:e.category, predicate:e.predicate, qualifier:e.qualifier, or_group:e.or_group, native_relation:e.native_relation, confidence:e.confidence, evidence_file:e.evidence_file, evidence_path:e.evidence_path, evidence_key:e.evidence_key, evidence_value:e.evidence_value})}`;
-  bindPanelActions();
-}
-function selectNode(id){
-  if(!nodeById[id]) return;
-  selectedId = id;
-  highlighted = new Set([id]);
-  faded = new Set();
-  const neighbors = new Set([id]);
-  const edgeIds = new Set();
-  for(const e of [...(outEdges[id]||[]), ...(inEdges[id]||[])]){
-    neighbors.add(e.source);
-    neighbors.add(e.target);
-    edgeIds.add(e.id);
-  }
-  for(const n of visibleNodes()) if(!neighbors.has(n.id)) faded.add(n.id);
-  for(const e of visibleEdges()) if(!edgeIds.has(e.id)) faded.add(e.id); else highlighted.add(e.id);
-  if(cy && cy.getElementById(id).length){
-    cy.elements().unselect();
-    cy.getElementById(id).select();
-    cy.animate({center:{eles:cy.getElementById(id)}, zoom:Math.max(cy.zoom(), .65)}, {duration:160});
-  }
-  showNode(id);
-  if(window.location.hash !== '#' + encodeURIComponent(id)) window.location.hash = encodeURIComponent(id);
-  applyClasses();
-}
-function selectEdge(edgeId){
-  const e = edgeById[edgeId]; if(!e) return;
-  selectedId = null;
-  highlighted = new Set([edgeId, e.source, e.target]);
-  faded = new Set();
-  for(const n of visibleNodes()) if(n.id !== e.source && n.id !== e.target) faded.add(n.id);
-  for(const edge of visibleEdges()) if(edge.id !== edgeId) faded.add(edge.id);
-  if(cy && cy.getElementById(edgeId).length){
-    cy.elements().unselect();
-    cy.getElementById(edgeId).select();
-    cy.animate({center:{eles:cy.getElementById(edgeId)}}, {duration:160});
-  }
-  showEdge(edgeId);
-  if(window.location.hash !== '#edge=' + encodeURIComponent(edgeId)) window.location.hash = 'edge=' + encodeURIComponent(edgeId);
-  applyClasses();
+function clearHighlightClasses(){
+  if(cy) cy.elements().removeClass('sel up down match');
 }
 function clearSelection(){
-  selectedId = null;
-  highlighted = new Set();
-  faded = new Set();
-  if(cy) cy.elements().unselect();
+  clearHighlightClasses();
   showOverview();
-  if(window.location.hash) history.replaceState(null, '', window.location.pathname + window.location.search);
-  applyClasses();
 }
-function openHashTarget(){
-  const hash = decodeURIComponent((window.location.hash || '').replace(/^#/, ''));
-  if(!hash) return false;
-  if(hash.startsWith('edge=')){
-    const edgeId = hash.slice(5);
-    if(edgeById[edgeId]){ expanded = true; relayout(); selectEdge(edgeId); return true; }
+
+/* ---------------------------------------------------------------------
+   Stats / crumb
+   ------------------------------------------------------------------- */
+function validateGraph(){
+  const ids = new Set((DATA.jobs || []).map(j => j.id));
+  let missing = 0;
+  const adj = {};
+  for(const j of DATA.jobs || []){
+    adj[j.id] = (j.depends_on || []).filter(d => { if(!ids.has(d)) missing++; return ids.has(d); });
   }
-  if(nodeById[hash]){ expanded = !!jobById[hash]; relayout(); selectNode(hash); return true; }
-  return false;
+  const color = {};
+  let cyc = false;
+  function dfs(n){
+    color[n] = 1;
+    for(const m of adj[n] || []){ if(color[m] === 1){ cyc = true; return; } if(!color[m]) dfs(m); }
+    color[n] = 2;
+  }
+  for(const j of DATA.jobs || []) if(!color[j.id]) dfs(j.id);
+  return { missing, cycles: cyc ? 1 : 0 };
 }
+const graphProblems = validateGraph();
+function updateStats(){
+  $('nJobs').textContent = (DATA.jobs || []).length;
+  $('nBoxes').textContent = (DATA.groups || []).length;
+  $('nEdges').textContent = (DATA.edges || []).length;
+  const health = $('health');
+  if(hasComparisonStatuses){
+    const statuses = DATA.metadata?.statuses || {};
+    const problems = Object.entries(statuses).filter(([k]) => isProblemStatus(k)).reduce((s,[,v]) => s+v, 0);
+    health.innerHTML = problems ? `<span class="bad">${problems} diffs</span>` : `<span class="good">no diffs</span>`;
+  } else {
+    health.innerHTML = (graphProblems.missing + graphProblems.cycles)
+      ? `<span class="bad">${graphProblems.cycles ? 'cycle, ' : ''}${graphProblems.missing} missing dep(s)</span>`
+      : `<span class="good">valid DAG</span>`;
+  }
+}
+function updateCrumb(){
+  const n = expandedGroups.size;
+  const total = (DATA.groups || []).length;
+  $('crumb').innerHTML = n === 0 ? 'all boxes collapsed'
+    : n === total ? '<b>all boxes</b> expanded'
+    : `<b>${n}</b> of ${total} boxes expanded`;
+}
+
+/* ---------------------------------------------------------------------
+   Side panel content
+   ------------------------------------------------------------------- */
+const pTitle = () => $('pTitle'), pSub = () => $('pSub'), pBody = () => $('pBody');
+function depRow(id){
+  const j = jobById[id]; if(!j) return '';
+  return `<div class="dep-item" data-job="${escapeHtml(id)}"><span class="dot ${j.watcher ? 'watcher' : ''}" style="background:${colorFor(id)}"></span><span class="nm" title="${escapeHtml(id)}">${escapeHtml(label(j))}</span></div>`;
+}
+function boxRow(gid){
+  const g = groupById[gid]; if(!g) return '';
+  return `<div class="dep-item" data-box="${escapeHtml(gid)}"><span class="box-dot" style="background:${colorFor(gid)}"></span><span class="nm">${escapeHtml(label(g))}</span></div>`;
+}
+function showOverview(){
+  pTitle().textContent = 'Overview';
+  pSub().textContent = `${DATA.metadata?.source_system || DATA.metadata?.report_title || ''} ${DATA.metadata?.env || ''}`.trim();
+  let html = `<div class="sec-title">Top-level boxes</div>`;
+  html += topLevelGroupIds.map(id => `<div class="legend-row" data-box="${escapeHtml(id)}"><span class="swatch" style="background:${colorFor(id)}"></span>${escapeHtml(label(groupById[id]))}</div>`).join('') || '<div class="empty">No containers in this graph</div>';
+  html += `<div class="sec-title">Legend</div>`;
+  html += `<div class="legend-row"><span class="dot" style="background:#868e96;position:relative;"></span>task / job</div>`;
+  html += `<div class="legend-row"><span class="swatch watcher" style="background:#0ca678"></span>file watcher / monitor</div>`;
+  if(hasComparisonStatuses){
+    const statuses = DATA.metadata?.statuses || {};
+    html += `<div class="sec-title">Status counts</div>`;
+    html += Object.entries(statuses).map(([k,v]) => `<div class="kv"><span class="k"><i class="swatch" style="display:inline-block;background:${statusColor(k) || '#868e96'};vertical-align:middle;margin-right:6px;"></i>${escapeHtml(k)}</span><span class="v">${escapeHtml(v)}</span></div>`).join('');
+  }
+  html += `<div class="sec-title">How to navigate</div><div class="placeholder">
+    Everything starts collapsed into boxes.<br>
+    &bull; <b>Click a box</b> to expand it; boxes it depends on / is depended on by stay highlighted as chips.<br>
+    &bull; <b>Click a job</b> to reveal it and highlight its <span style="color:var(--warn)">upstream</span> / <span style="color:var(--ok)">downstream</span> chain.<br>
+    &bull; <kbd>/</kbd> search &middot; <kbd>Esc</kbd> reset</div>`;
+  if((DATA.warnings || []).length){
+    html += `<div class="sec-title">Warnings <span class="count-pill">${DATA.warnings.length}</span></div>`;
+    html += DATA.warnings.slice(0, 40).map(w => `<div class="empty">${escapeHtml(w)}</div>`).join('');
+  }
+  pBody().innerHTML = html;
+  bindPanelActions();
+}
+function showGroupPanel(gid){
+  const g = groupById[gid]; if(!g) return;
+  const linked = [...linkedGroups(gid)].sort();
+  const jobs = descendantJobs(gid);
+  pTitle().textContent = label(g);
+  pSub().textContent = `Box${g.parent ? ' · in ' + label(groupById[g.parent]) : ''}`;
+  let html = kv('Jobs', jobs.length) + kv('File watchers', jobs.filter(jid => jobById[jid]?.watcher).length);
+  if(g.status) html += kv('Status', g.status);
+  html += `<div class="sec-title">Linked boxes <span class="count-pill">${linked.length}</span></div>`;
+  html += linked.length ? linked.map(boxRow).join('') : '<div class="empty">No cross-box dependencies</div>';
+  pBody().innerHTML = html;
+  bindPanelActions();
+}
+// A job with a few thousand direct dependents (common for a shared
+// staging/ingestion job) would otherwise dump that many DOM nodes into the
+// panel in one shot - cap the rendered list and say how many are hidden.
+const DEP_LIST_RENDER_CAP = 150;
+function renderDepList(ids, emptyMessage){
+  if(!ids.length) return `<div class="empty">${emptyMessage}</div>`;
+  const shown = ids.slice(0, DEP_LIST_RENDER_CAP).map(depRow).join('');
+  const hidden = ids.length - DEP_LIST_RENDER_CAP;
+  return hidden > 0 ? shown + `<div class="chain-note">+${hidden} more not shown (use search)</div>` : shown;
+}
+function showJobPanel(id){
+  const j = jobById[id]; if(!j) return;
+  const up = (upOf[id] || []).slice().sort(), down = (downOf[id] || []).slice().sort();
+  pTitle().textContent = label(j);
+  pSub().textContent = `${j.group ? label(groupById[j.group]) + ' · ' : ''}${id}${j.watcher ? ' · file watcher' : ''}`;
+  let html = kv('Box', j.group ? label(groupById[j.group]) : '—') + kv('Kind', j.kind || j.original_kind || '');
+  if(j.meta) html += metaRows(j.meta);
+  if(j.status) html += kv('Status', j.status);
+  if(j.trigger) html += `<div class="sec-title">Trigger</div><div class="copy-row">${copyable(j.trigger)} ${copyButton(j.trigger, 'Copy trigger')}</div>`;
+  html += `<div class="sec-title up"><span class="arrow">&#9650;</span> Depends on <span class="count-pill">${up.length}</span></div>`;
+  html += renderDepList(up, 'No upstream dependencies (root job)');
+  const ut = chainSize(id, upOf); if(ut > up.length) html += `<div class="chain-note">${ut} jobs upstream in total</div>`;
+  html += `<div class="sec-title down"><span class="arrow">&#9660;</span> Required by <span class="count-pill">${down.length}</span></div>`;
+  html += renderDepList(down, 'Nothing depends on this (leaf job)');
+  const dt = chainSize(id, downOf); if(dt > down.length) html += `<div class="chain-note">${dt} jobs downstream in total</div>`;
+  const outgoing = outEdges[id] || [], incoming = inEdges[id] || [];
+  if(outgoing.length || incoming.length){
+    html += `<div class="sec-title">Evidence</div>`;
+    html += [...outgoing, ...incoming].slice(0, 60).map(e => edgeCard(e, id)).join('');
+  }
+  pBody().innerHTML = html;
+  bindPanelActions();
+}
+function edgeCard(e, selfId){
+  const other = e.source === selfId ? e.target : e.source;
+  const evidence = [e.relation, e.confidence, e.evidence_file, e.evidence_key, e.evidence_path].filter(Boolean).join(' | ');
+  return `<div class="edge-card"><div class="edge-main" data-job="${escapeHtml(other)}"><span>${escapeHtml(e.relation || 'depends_on')}</span><span>&harr;</span><b>${escapeHtml(other)}</b></div><div class="edge-meta">${escapeHtml(evidence)}</div><div class="copy-row">${copyButton(`${e.source} -> ${e.relation} -> ${e.target}`, 'Copy edge')}</div></div>`;
+}
+function showEdgePanel(edgeVisualId){
+  const ele = cy.getElementById(edgeVisualId);
+  const refIds = ele && ele.length ? (ele.data('refIds') || []) : [];
+  const realEdges = refIds.map(id => edgeById[id]).filter(Boolean);
+  pTitle().textContent = 'Dependency';
+  pSub().textContent = ele && ele.length ? `${ele.data('source')} -> ${ele.data('target')}` : edgeVisualId;
+  let html = `<div class="sec-title">Endpoints</div>`;
+  if(ele && ele.length){
+    html += `<div class="kv"><span class="k">Source</span><span class="v"><span class="linkish" data-any="${escapeHtml(ele.data('source'))}">${escapeHtml(ele.data('source'))}</span></span></div>`;
+    html += `<div class="kv"><span class="k">Target</span><span class="v"><span class="linkish" data-any="${escapeHtml(ele.data('target'))}">${escapeHtml(ele.data('target'))}</span></span></div>`;
+  }
+  html += `<div class="sec-title">Underlying edges <span class="count-pill">${realEdges.length}</span></div>`;
+  html += realEdges.length ? realEdges.map(e => {
+    const evidence = [e.status, e.relation, e.confidence, e.evidence_file, e.evidence_key, e.evidence_path].filter(Boolean).join(' | ');
+    return `<div class="edge-card"><div class="edge-main"><span>${escapeHtml(e.source)}</span><span>&rarr;</span><b>${escapeHtml(e.target)}</b></div><div class="edge-meta">${escapeHtml(e.relation)} ${escapeHtml(evidence)}</div></div>`;
+  }).join('') : '<div class="empty">No evidence recorded</div>';
+  pBody().innerHTML = html;
+  bindPanelActions();
+}
+function bindPanelActions(){
+  pBody().querySelectorAll('[data-job]').forEach(el => el.addEventListener('click', ev => { ev.stopPropagation(); focusJob(el.getAttribute('data-job')); }));
+  pBody().querySelectorAll('[data-box]').forEach(el => el.addEventListener('click', ev => { ev.stopPropagation(); expandBoxPath(el.getAttribute('data-box')); }));
+  pBody().querySelectorAll('[data-any]').forEach(el => el.addEventListener('click', ev => {
+    ev.stopPropagation();
+    const id = el.getAttribute('data-any');
+    if(jobById[id]) focusJob(id); else if(groupById[id]) expandBoxPath(id);
+  }));
+  pBody().querySelectorAll('[data-copy]').forEach(el => el.addEventListener('click', ev => {
+    ev.stopPropagation(); copyText(el.getAttribute('data-copy'));
+    const original = el.textContent; el.textContent = 'Copied'; setTimeout(() => { el.textContent = original; }, 900);
+  }));
+}
+
+/* ---------------------------------------------------------------------
+   Search
+   ------------------------------------------------------------------- */
+const searchInput = $('search'), searchCount = $('searchCount');
+// A very broad query (a short/common substring) can match thousands of jobs
+// scattered across just as many boxes - auto-expanding all of their ancestor
+// paths at once would be exactly the "expand everything" cost we're trying
+// to avoid, just triggered by typing instead of a button.
+const SEARCH_EXPAND_CAP = 300;
+function runSearch(){
+  const q = searchInput.value.trim().toLowerCase();
+  if(!q){
+    searchCount.textContent = '';
+    expandedGroups = new Set();
+    buildCy();
+    clearHighlightClasses();
+    showOverview();
+    return;
+  }
+  const matches = (DATA.jobs || []).filter(j => label(j).toLowerCase().includes(q) || j.id.toLowerCase().includes(q));
+  const toExpand = matches.length > SEARCH_EXPAND_CAP ? matches.slice(0, SEARCH_EXPAND_CAP) : matches;
+  searchCount.textContent = matches.length > toExpand.length
+    ? `${matches.length} (showing first ${toExpand.length}, refine search)`
+    : String(matches.length);
+  const paths = new Set();
+  for(const m of toExpand) for(const g of ancestorChain(m.id)) paths.add(g);
+  expandedGroups = paths;
+  buildCy({ skipFit: true });
+  clearHighlightClasses();
+  toExpand.forEach(m => { const ele = cy.getElementById(m.id); if(ele.length) ele.addClass('match'); });
+  fitToVisible(toExpand.map(m => m.id), 80);
+  if(matches.length === 1) showJobPanel(matches[0].id);
+}
+let searchTimer;
+searchInput.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 200); });
+
+/* ---------------------------------------------------------------------
+   Toolbar
+   ------------------------------------------------------------------- */
+function collapseAll(){ expandedGroups = new Set(); buildCy(); clearHighlightClasses(); showOverview(); }
+// Expanding every box lays out every job in the report at once - fine for a
+// few hundred, worth confirming for a few thousand so a slow layout is
+// something the user asked for, not a surprise freeze after one click.
+const EXPAND_ALL_CONFIRM_THRESHOLD = 2000;
+function expandAll(){
+  const jobCount = (DATA.jobs || []).length;
+  if(jobCount > EXPAND_ALL_CONFIRM_THRESHOLD){
+    const ok = window.confirm(`Expand all ${jobCount} jobs? This lays out the entire graph at once and may take a few seconds.`);
+    if(!ok) return;
+  }
+  expandedGroups = new Set((DATA.groups || []).map(g => g.id));
+  buildCy();
+  clearHighlightClasses();
+  showOverview();
+}
+$('fit').onclick = () => { if(cy) cy.fit(undefined, 40); };
+$('zoomIn').onclick = () => zoomBy(1.35);
+$('zoomOut').onclick = () => zoomBy(1 / 1.35);
+$('collapseAll').onclick = collapseAll;
+$('expandAll').onclick = expandAll;
+$('dir').onclick = ev => { direction = direction === 'TB' ? 'LR' : 'TB'; ev.target.textContent = direction; buildCy(); };
+
 function setStatusFilter(value){
   activeStatusFilter = value;
   $('statusFilter').value = value;
-  $('statusFilter').classList.toggle('active', value !== 'all');
   for(const id of quickFilters) $(id).classList.remove('active');
   if(value === 'problems') $('showProblems').classList.add('active');
-  if(value === 'critical') $('showCritical').classList.add('active');
-  if(value === 'missing') $('showMissing').classList.add('active');
-  if(value === 'all') $('showAll').classList.add('active');
-  clearSelection();
-  relayout();
+  else if(value === 'critical') $('showCritical').classList.add('active');
+  else if(value === 'missing') $('showMissing').classList.add('active');
+  else if(value === 'all') $('showAll').classList.add('active');
+  buildCy();
+  clearHighlightClasses();
+  showOverview();
 }
+if(hasComparisonStatuses){
+  $('statusFilter').onchange = ev => setStatusFilter(ev.target.value);
+  $('showProblems').onclick = () => setStatusFilter('problems');
+  $('showCritical').onclick = () => setStatusFilter('critical');
+  $('showMissing').onclick = () => setStatusFilter('missing');
+  $('showAll').onclick = () => setStatusFilter('all');
+}
+if(hasStrictnessLevels){
+  $('levelFilter').onchange = ev => {
+    applyStrictnessStatuses(ev.target.value);
+    buildCy();
+    clearHighlightClasses();
+    showOverview();
+  };
+}
+document.addEventListener('keydown', ev => {
+  if(ev.key === 'Escape'){ searchInput.value = ''; searchCount.textContent = ''; collapseAll(); searchInput.blur(); }
+  if(ev.key === '/' && document.activeElement !== searchInput){ ev.preventDefault(); searchInput.focus(); }
+});
+window.addEventListener('resize', () => { if(cy) cy.resize(); });
 
-$('fit').onclick = fit;
-$('expand').onclick = () => { expanded = true; clearSelection(); relayout(); fit(); };
-$('collapse').onclick = () => { expanded = false; clearSelection(); relayout(); fit(); };
-$('dir').onclick = () => {
-  direction = direction === 'LR' ? 'TB' : 'LR';
-  $('dir').textContent = `Direction: ${direction}`;
-  relayout();
-};
-$('levelFilter').onchange = e => {
-  applyStrictnessStatuses(e.target.value);
-  clearSelection();
-  relayout();
-};
-$('statusFilter').onchange = e => setStatusFilter(e.target.value);
-$('showProblems').onclick = () => { expanded = true; visibleCategories = new Set(['all']); $('relationFilter').value = 'all'; setStatusFilter('problems'); };
-$('showCritical').onclick = () => { expanded = true; visibleCategories = new Set(['all']); $('relationFilter').value = 'all'; setStatusFilter('critical'); };
-$('showMissing').onclick = () => { expanded = true; visibleCategories = new Set(['all']); $('relationFilter').value = 'all'; setStatusFilter('missing'); };
-$('showAll').onclick = () => { visibleCategories = new Set(['all']); $('relationFilter').value = 'all'; setStatusFilter('all'); };
-$('relationFilter').onchange = e => { visibleCategories = new Set([e.target.value]); clearSelection(); relayout(); };
-$('search').oninput = e => {
-  const q = e.target.value.trim().toLowerCase();
-  highlighted = new Set();
-  faded = new Set();
-  selectedId = null;
-  if(q){
-    for(const n of visibleNodes()){
-      const hay = `${label(n)} ${n.id} ${n.kind}`.toLowerCase();
-      if(hay.includes(q)) highlighted.add(n.id); else faded.add(n.id);
-    }
-  }
-  applyClasses();
-};
-window.addEventListener('resize', () => { if(cy) cy.resize(); fit(); });
+/* ---------------------------------------------------------------------
+   Init
+   ------------------------------------------------------------------- */
 buildCy();
 showOverview();
-if(!openHashTarget()) showOverview();
-window.addEventListener('hashchange', () => { if(!openHashTarget()) clearSelection(); });
 })();
 </script>
 </body>
