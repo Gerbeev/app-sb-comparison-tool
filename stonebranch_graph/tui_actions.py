@@ -8,9 +8,11 @@ from .workflows import (
     CompareSkeletonResult,
     CompareWorkflowResult,
     GraphWorkflowResult,
+    KeysCompareWorkflowResult,
     ProfileWorkflowResult,
     ReconciliationKeysWorkflowResult,
     SkeletonWorkflowResult,
+    keys_compare_default_paths,
     profile_jil_schema,
     profile_stonebranch_schema,
 )
@@ -37,6 +39,9 @@ from .workflows import (
 )
 from .workflows import (
     compare_packs as run_compare_packs,
+)
+from .workflows import (
+    compare_reconciliation_keys as run_compare_reconciliation_keys,
 )
 from .workflows import (
     compare_skeleton_direct as run_compare_skeleton_direct,
@@ -137,6 +142,20 @@ def reconciliation_keys(settings: TuiSettings, config: AnalyzerConfig) -> Reconc
         deep_scan=settings.deep_scan,
         include_raw_values=settings.include_raw_values,
         keep_task_monitor_suffix=settings.keep_task_monitor_suffix,
+    )
+
+
+def reconciliation_keys_ready(settings: TuiSettings) -> bool:
+    sb_keys_path, jil_keys_path = keys_compare_default_paths(Path(settings.reconciliation_keys_path))
+    return sb_keys_path.exists() and jil_keys_path.exists()
+
+
+def compare_reconciliation_keys(settings: TuiSettings) -> KeysCompareWorkflowResult:
+    sb_keys_path, jil_keys_path = keys_compare_default_paths(Path(settings.reconciliation_keys_path))
+    return run_compare_reconciliation_keys(
+        stonebranch_keys_path=sb_keys_path,
+        jil_keys_path=jil_keys_path,
+        output_dir=Path(settings.reconciliation_keys_path) / "report",
     )
 
 

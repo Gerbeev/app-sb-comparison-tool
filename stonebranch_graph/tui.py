@@ -20,6 +20,7 @@ from .tui_rendering import (
     enable_windows_ansi,
     print_compare_summary,
     print_header,
+    print_keys_compare_summary,
     print_last_files,
     print_main_dashboard,
     print_menu_item,
@@ -66,8 +67,10 @@ class TerminalUi:
                 elif choice == "3":
                     self.compare_packs()
                 elif choice == "4":
-                    self.settings_menu()
+                    self.compare_reconciliation_keys()
                 elif choice == "5":
+                    self.settings_menu()
+                elif choice == "6":
                     self.other_menu()
                 elif choice == "0":
                     self.save_settings(silent=True)
@@ -370,6 +373,21 @@ class TerminalUi:
         self.show_last_files(pause=False)
         self.pause()
 
+    def compare_reconciliation_keys(self) -> None:
+        s = self.ensure_settings_for("reconciliation-keys")
+        if s is None:
+            return
+        if not tui_actions.reconciliation_keys_ready(s):
+            self.warn("ids/stonebranch.keys.json and/or ids/autosys.keys.json not found yet - building them first.")
+            tui_actions.reconciliation_keys(s, self.config)
+        result = tui_actions.compare_reconciliation_keys(s)
+        self.last_summary = result.summary
+        self.last_files = result.files
+        self.success(f"Reconciliation keys comparison report created: {result.output_dir.resolve()}")
+        self.print_keys_compare_summary(self.last_summary)
+        self.show_last_files(pause=False)
+        self.pause()
+
     def build_stonebranch_skeleton(self) -> None:
         s = self.ensure_settings_for("build-skeleton-stonebranch")
         if s is None:
@@ -547,6 +565,9 @@ class TerminalUi:
 
     def print_compare_summary(self, summary: dict[str, Any]) -> None:
         print_compare_summary(summary)
+
+    def print_keys_compare_summary(self, summary: dict[str, Any]) -> None:
+        print_keys_compare_summary(summary)
 
     def show_last_files(self, pause: bool = True) -> None:
         print_last_files(self.last_files)

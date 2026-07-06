@@ -32,20 +32,12 @@ MAIN_MENU_ITEMS = [
     ("1", "Build Stonebranch analysis pack", "Create a full Stonebranch pack: json/graph.json, csv, ids, indexes, metrics, and source-side reports.", "PACK"),
     ("2", "Build JIL analysis pack", "Create a full JIL pack: json/graph.json, csv, ids, indexes, metrics, and source-side reports.", "PACK"),
     ("3", "Compare analysis packs", "Compare Stonebranch/JIL pack folders and produce detailed gaps, critical diffs, and remediation checklist.", "MAIN"),
-    ("4", "Settings", "Open simple setup first, with advanced mapping, parser options, and save/load in More settings.", "SETUP"),
-    ("5", "Other tools", "Direct compare, compare graph.json files, schema profiles, and last output file list.", "OTHER"),
+    ("4", "Compare reconciliation keys", "Compare ids/stonebranch.keys.json vs ids/autosys.keys.json and write a Markdown + JSON report: overall stats, match rate, and a breakdown of matched/missing objects by type. Builds the key files first if they don't exist yet.", "MAIN"),
+    ("5", "Settings", "Open simple setup first, with advanced mapping, parser options, and save/load in More settings.", "SETUP"),
+    ("6", "Other tools", "Direct compare, compare graph.json files, schema profiles, and last output file list.", "OTHER"),
     ("0", "Exit", "Save settings and close the terminal UI.", "EXIT"),
 ]
 
-
-OTHER_MENU_ITEMS = [
-    ("1", "Run direct compare: Stonebranch ↔ JIL", "Parse both repositories and compare immediately. Good for quick checks; packs are better for iterative analysis.", "GRAPH"),
-    ("2", "Compare existing graph.json files", "Compare previously generated Stonebranch/JIL graph.json files without reparsing repositories.", "GRAPH"),
-    ("3", "Profile Stonebranch schema", "Generate a safe structure profile of Stonebranch JSON keys and types without values.", "PROFILE"),
-    ("4", "Profile JIL schema", "Generate a safe structure profile of JIL job blocks and attributes.", "PROFILE"),
-    ("5", "Show last output files", "Print the most important files from the last run: manifests, reports, graph.json, metrics, diffs.", "SETUP"),
-    ("0", "Back", "Return to the main menu.", "EXIT"),
-]
 
 OTHER_MENU_ITEMS = [
     ("1", "Build Stonebranch skeleton", "Create canonical Stonebranch skeleton JSONL, index CSV, and offline graph view.", "GRAPH"),
@@ -103,6 +95,17 @@ COMPARE_SUMMARY_KEYS = [
     "node_match_rate_percent",
     "edge_match_rate_percent",
     "critical_dependency_loss_count",
+]
+
+
+KEYS_COMPARE_SUMMARY_KEYS = [
+    "stonebranch_keys_total",
+    "jil_keys_total",
+    "union_total",
+    "matched_total",
+    "only_in_stonebranch_total",
+    "only_in_jil_total",
+    "match_rate_percent",
 ]
 
 
@@ -331,6 +334,14 @@ def print_compare_summary(summary: dict[str, Any]) -> None:
     print()
     print(color_text("Summary", "bright_cyan", "bold"))
     for key in COMPARE_SUMMARY_KEYS:
+        if key in summary:
+            print(f"  {key}: {summary[key]}")
+
+
+def print_keys_compare_summary(summary: dict[str, Any]) -> None:
+    print()
+    print(color_text("Summary", "bright_cyan", "bold"))
+    for key in KEYS_COMPARE_SUMMARY_KEYS:
         if key in summary:
             print(f"  {key}: {summary[key]}")
 

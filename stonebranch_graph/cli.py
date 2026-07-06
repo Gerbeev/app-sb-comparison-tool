@@ -19,6 +19,7 @@ from .workflows import (
     compare_direct,
     compare_graph_json,
     compare_packs,
+    compare_reconciliation_keys,
     compare_skeleton_direct,
     profile_jil_schema,
     profile_stonebranch_schema,
@@ -46,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_compare_parser(subparsers)
     add_compare_skeleton_parser(subparsers)
     add_reconciliation_keys_parser(subparsers)
+    add_compare_keys_parser(subparsers)
     add_profile_parsers(subparsers)
     add_pack_parsers(subparsers)
     add_existing_graph_compare_parser(subparsers)
@@ -160,6 +162,16 @@ def add_reconciliation_keys_parser(subparsers: argparse._SubParsersAction[argpar
     )
 
 
+def add_compare_keys_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "compare-keys",
+        help="Compare two reconciliation keys.json files and write a Markdown + JSON report.",
+    )
+    parser.add_argument("--stonebranch-keys", type=Path, required=True, help="Path to stonebranch.keys.json.")
+    parser.add_argument("--jil-keys", type=Path, required=True, help="Path to autosys.keys.json.")
+    parser.add_argument("-o", "--output", type=Path, required=True)
+
+
 def add_profile_parsers(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     stonebranch = subparsers.add_parser("profile-stonebranch", help="Write Stonebranch JSON schema profile without values.")
     add_source_output(stonebranch)
@@ -206,6 +218,7 @@ def run_command(args: argparse.Namespace, config: AnalyzerConfig) -> int:
         "compare": handle_compare_direct,
         "compare-skeleton": handle_compare_skeleton,
         "reconciliation-keys": handle_reconciliation_keys,
+        "compare-keys": handle_compare_keys,
         "profile-stonebranch": handle_profile_stonebranch,
         "profile-jil": handle_profile_jil,
         "build-stonebranch-pack": handle_build_stonebranch_pack,
@@ -346,6 +359,21 @@ def handle_reconciliation_keys(args: argparse.Namespace, config: AnalyzerConfig)
         print("OK: -tm/-taskmonitor objects kept as separate entries (not folded onto twin)")
     else:
         print("OK: -tm/-taskmonitor objects folded onto their twin (--no-keep-task-monitor-suffix)")
+    print(f"OK: output={args.output.resolve()}")
+    return 0
+
+
+def handle_compare_keys(args: argparse.Namespace, config: AnalyzerConfig) -> int:
+    result = compare_reconciliation_keys(
+        stonebranch_keys_path=args.stonebranch_keys,
+        jil_keys_path=args.jil_keys,
+        output_dir=args.output,
+    )
+    s = result.summary
+    print(
+        f"OK: matched={s['matched_total']} only_in_stonebranch={s['only_in_stonebranch_total']} "
+        f"only_in_jil={s['only_in_jil_total']} match_rate={s['match_rate_percent']}%"
+    )
     print(f"OK: output={args.output.resolve()}")
     return 0
 

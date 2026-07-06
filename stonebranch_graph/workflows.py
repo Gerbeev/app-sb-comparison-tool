@@ -17,7 +17,14 @@ from .exporters import (
     reconciliation_keys_filename,
     write_text_file,
 )
+from .domain import SOURCE_AUTOSYS_JIL, SOURCE_STONEBRANCH
 from .html_graph import export_skeleton_comparison_html, export_skeleton_html_report
+from .keys_compare import (
+    KeysComparison,
+    compare_keys_files,
+    export_keys_comparison_json,
+    export_keys_comparison_markdown,
+)
 from .logging_utils import log_comparison_risks, log_exception, log_graph_warnings, log_info
 from .pack import compare_analysis_packs, create_analysis_pack
 from .parsers.autosys_jil import AutosysJilParser
@@ -83,6 +90,14 @@ class ProfileWorkflowResult:
 class ReconciliationKeysWorkflowResult:
     stonebranch_graph: Graph
     jil_graph: Graph
+    output_dir: Path
+    summary: dict[str, Any]
+    files: list[Path]
+
+
+@dataclass(frozen=True)
+class KeysCompareWorkflowResult:
+    comparison: KeysComparison
     output_dir: Path
     summary: dict[str, Any]
     files: list[Path]
@@ -363,6 +378,64 @@ def build_reconciliation_keys(
         )
     except Exception as exc:
         log_exception(output_dir, "Reconciliation keys only build", exc)
+        raise
+
+
+def keys_compare_default_paths(reconciliation_keys_dir: Path) -> tuple[Path, Path]:
+    """Return the conventional `ids/stonebranch.keys.json` / `ids/autosys.keys.json`
+
+    paths under a reconciliation-keys output folder (the folder produced by
+    `build_reconciliation_keys`).
+    """
+    ids_dir = reconciliation_keys_dir / "ids"
+    return (
+        ids_dir / reconciliation_keys_filename(SOURCE_STONEBRANCH),
+        ids_dir / reconciliation_keys_filename(SOURCE_AUTOSYS_JIL),
+    )
+
+
+def keys_compare_files(output_dir: Path) -> list[Path]:
+    return [output_dir / "keys-report.md", output_dir / "json" / "keys-comparison.json"]
+
+
+def compare_reconciliation_keys(
+    *,
+    stonebranch_keys_path: Path,
+    jil_keys_path: Path,
+    output_dir: Path,
+) -> KeysCompareWorkflowResult:
+    """Diff two already-exported `*.keys.json` files and write a Markdown +
+
+    JSON report: overall match statistics plus a breakdown by object type
+    (kind), and the full lists of objects present on only one side. A
+    lightweight sibling of `build_reconciliation_keys` for the "I already
+    have the two key lists, now show me the differences" step -- no
+    repository parsing involved, just a set diff over the two flat arrays.
+    """
+    log_info(output_dir, f"Starting reconciliation keys comparison: stonebranch={stonebranch_keys_path} jil={jil_keys_path}")
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        comparison = compare_keys_files(stonebranch_keys_path, jil_keys_path)
+        report_path = output_dir / "keys-report.md"
+        json_path = output_dir / "json" / "keys-comparison.json"
+        export_keys_comparison_markdown(comparison, report_path)
+        export_keys_comparison_json(comparison, json_path)
+        summary = comparison.summary
+        log_info(
+            output_dir,
+            "Completed reconciliation keys comparison: "
+            f"matched={summary['matched_total']} "
+            f"only_in_stonebranch={summary['only_in_stonebranch_total']} "
+            f"only_in_jil={summary['only_in_jil_total']}",
+        )
+        return KeysCompareWorkflowResult(
+            comparison=comparison,
+            output_dir=output_dir,
+            summary=summary,
+            files=[report_path, json_path],
+        )
+    except Exception as exc:
+        log_exception(output_dir, "Reconciliation keys comparison", exc)
         raise
 
 
