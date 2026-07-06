@@ -9,12 +9,16 @@ from .workflows import (
     CompareWorkflowResult,
     GraphWorkflowResult,
     ProfileWorkflowResult,
+    ReconciliationKeysWorkflowResult,
     SkeletonWorkflowResult,
     profile_jil_schema,
     profile_stonebranch_schema,
 )
 from .workflows import (
     build_jil_pack as run_build_jil_pack,
+)
+from .workflows import (
+    build_reconciliation_keys as run_build_reconciliation_keys,
 )
 from .workflows import (
     build_jil_skeleton_workflow as run_build_jil_skeleton,
@@ -119,6 +123,20 @@ def compare_direct(settings: TuiSettings, config: AnalyzerConfig) -> CompareWork
         deep_scan=settings.deep_scan,
         mapping_path=optional_path(settings.mapping_path),
         include_raw_values=settings.include_raw_values,
+    )
+
+
+def reconciliation_keys(settings: TuiSettings, config: AnalyzerConfig) -> ReconciliationKeysWorkflowResult:
+    return run_build_reconciliation_keys(
+        stonebranch_path=Path(settings.stonebranch_path),
+        jil_path=Path(settings.jil_path),
+        output_dir=Path(settings.reconciliation_keys_path),
+        config=runtime_config(settings, config),
+        env=settings.env,
+        env_aware=settings.env_aware,
+        deep_scan=settings.deep_scan,
+        include_raw_values=settings.include_raw_values,
+        keep_task_monitor_suffix=settings.keep_task_monitor_suffix,
     )
 
 

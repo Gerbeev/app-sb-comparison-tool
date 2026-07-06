@@ -12,6 +12,7 @@ from .workflows import (
     build_jil_graph,
     build_jil_pack,
     build_jil_skeleton_workflow,
+    build_reconciliation_keys,
     build_stonebranch_graph,
     build_stonebranch_pack,
     build_stonebranch_skeleton_workflow,
@@ -44,6 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_build_skeleton_parsers(subparsers)
     add_compare_parser(subparsers)
     add_compare_skeleton_parser(subparsers)
+    add_reconciliation_keys_parser(subparsers)
     add_profile_parsers(subparsers)
     add_pack_parsers(subparsers)
     add_existing_graph_compare_parser(subparsers)
@@ -133,6 +135,28 @@ def add_compare_skeleton_parser(subparsers: argparse._SubParsersAction[argparse.
     add_skeleton_alias_option(parser)
 
 
+def add_reconciliation_keys_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "reconciliation-keys",
+        help="Build only stonebranch.keys.json / autosys.keys.json for a plain-text/Notepad++ diff.",
+    )
+    parser.add_argument("--stonebranch", type=Path, required=True)
+    parser.add_argument("--jil", type=Path, required=True)
+    parser.add_argument("-o", "--output", type=Path, required=True)
+    parser.add_argument("--env", default="default")
+    parser.add_argument("--env-aware", action="store_true")
+    parser.add_argument("--deep-scan", action="store_true")
+    parser.add_argument("--include-raw-values", action="store_true")
+    parser.add_argument(
+        "--keep-task-monitor-suffix",
+        action="store_true",
+        help=(
+            "Do not fold -tm/-taskmonitor-suffixed objects onto their twin; "
+            "keep them as their own separate entries in the key lists."
+        ),
+    )
+
+
 def add_profile_parsers(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     stonebranch = subparsers.add_parser("profile-stonebranch", help="Write Stonebranch JSON schema profile without values.")
     add_source_output(stonebranch)
@@ -178,6 +202,7 @@ def run_command(args: argparse.Namespace, config: AnalyzerConfig) -> int:
         "build-skeleton-jil": handle_build_skeleton_jil,
         "compare": handle_compare_direct,
         "compare-skeleton": handle_compare_skeleton,
+        "reconciliation-keys": handle_reconciliation_keys,
         "profile-stonebranch": handle_profile_stonebranch,
         "profile-jil": handle_profile_jil,
         "build-stonebranch-pack": handle_build_stonebranch_pack,
@@ -297,6 +322,25 @@ def handle_compare_skeleton(args: argparse.Namespace, config: AnalyzerConfig) ->
         "OK: skeleton logic/strict changed: "
         f"logic={logic['changed']} strict={strict['changed']}"
     )
+    print(f"OK: output={args.output.resolve()}")
+    return 0
+
+
+def handle_reconciliation_keys(args: argparse.Namespace, config: AnalyzerConfig) -> int:
+    result = build_reconciliation_keys(
+        stonebranch_path=args.stonebranch,
+        jil_path=args.jil,
+        output_dir=args.output,
+        config=config,
+        env=args.env,
+        env_aware=args.env_aware,
+        deep_scan=args.deep_scan,
+        include_raw_values=args.include_raw_values,
+        keep_task_monitor_suffix=args.keep_task_monitor_suffix,
+    )
+    print(f"OK: stonebranch keys={result.summary['stonebranch_keys']} jil keys={result.summary['jil_keys']}")
+    if args.keep_task_monitor_suffix:
+        print("OK: -tm/-taskmonitor objects kept as separate entries (not folded onto twin)")
     print(f"OK: output={args.output.resolve()}")
     return 0
 

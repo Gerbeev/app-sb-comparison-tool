@@ -23,6 +23,8 @@ class TuiSettings:
     include_raw_values: bool = False
     deep_scan: bool = False
     env_aware: bool = False
+    keep_task_monitor_suffix: bool = False
+    reconciliation_keys_path: str = "out/reconciliation-keys"
 
 
 def load_tui_settings(settings_file: Path = SETTINGS_FILE) -> TuiSettings:

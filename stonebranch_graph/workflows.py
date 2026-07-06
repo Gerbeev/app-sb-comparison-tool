@@ -8,10 +8,11 @@ from typing import Any
 from .alias import AliasTable
 from .compare import Comparison, compare_graphs, export_comparison
 from .config import AnalyzerConfig, MappingConfig
-from .core import Graph
+from .core import Graph, resolve_suffix_patterns
 from .exporters import (
     export_csv_rows,
     export_graph_bundle,
+    export_reconciliation_keys,
     load_graph_json,
     reconciliation_keys_filename,
     write_text_file,
@@ -73,6 +74,15 @@ class CompareSkeletonResult:
 @dataclass(frozen=True)
 class ProfileWorkflowResult:
     profile_type: str
+    output_dir: Path
+    summary: dict[str, Any]
+    files: list[Path]
+
+
+@dataclass(frozen=True)
+class ReconciliationKeysWorkflowResult:
+    stonebranch_graph: Graph
+    jil_graph: Graph
     output_dir: Path
     summary: dict[str, Any]
     files: list[Path]
@@ -286,6 +296,71 @@ def build_jil_graph(
         )
     except Exception as exc:
         log_exception(output_dir, "JIL graph build", exc)
+        raise
+
+
+def reconciliation_keys_files(output_dir: Path, stonebranch_source: str, jil_source: str) -> list[Path]:
+    return [
+        output_dir / reconciliation_keys_filename(stonebranch_source),
+        output_dir / reconciliation_keys_filename(jil_source),
+    ]
+
+
+def build_reconciliation_keys(
+    *,
+    stonebranch_path: Path,
+    jil_path: Path,
+    output_dir: Path,
+    config: AnalyzerConfig,
+    env: str = "default",
+    env_aware: bool = False,
+    deep_scan: bool = False,
+    include_raw_values: bool = False,
+    keep_task_monitor_suffix: bool = False,
+) -> ReconciliationKeysWorkflowResult:
+    """Build only the two reconciliation key-list files (no full graph bundle).
+
+    A lightweight sibling of `compare_direct` for the common "just give me
+    the two diff-ready files" workflow: parses both sides and writes
+    `stonebranch.keys.json` / `autosys.keys.json` straight to `output_dir`,
+    skipping graph.html/containers/metrics/etc. `keep_task_monitor_suffix`
+    lets a reviewer keep Task Monitor (`-tm` / `-taskmonitor`) objects as
+    their own separate entries instead of folding them onto their twin --
+    useful when they're needed to understand the full picture during a
+    reconciliation pass.
+    """
+    log_info(output_dir, f"Starting reconciliation keys only: stonebranch={stonebranch_path} jil={jil_path} env={env}")
+    try:
+        runtime_config = config.with_runtime_flags(include_raw_values=include_raw_values)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        sb_graph = StonebranchJsonParser(runtime_config, env=env, env_aware=env_aware, deep_scan=deep_scan).parse(stonebranch_path)
+        jil_graph = AutosysJilParser(runtime_config, env=env).parse(jil_path)
+        patterns = resolve_suffix_patterns(runtime_config.suffix_strips, keep_task_monitor_suffix=keep_task_monitor_suffix)
+
+        sb_path = output_dir / reconciliation_keys_filename(sb_graph.source_system)
+        jil_out_path = output_dir / reconciliation_keys_filename(jil_graph.source_system)
+        sb_ids = export_reconciliation_keys(sb_graph, sb_path, patterns=patterns)
+        jil_ids = export_reconciliation_keys(jil_graph, jil_out_path, patterns=patterns)
+
+        log_graph_warnings(output_dir, sb_graph.warnings, source="stonebranch")
+        log_graph_warnings(output_dir, jil_graph.warnings, source="jil")
+        summary = {
+            "stonebranch_nodes": len(sb_graph.nodes),
+            "jil_nodes": len(jil_graph.nodes),
+            "stonebranch_keys": len(sb_ids),
+            "jil_keys": len(jil_ids),
+            "keep_task_monitor_suffix": keep_task_monitor_suffix,
+        }
+        log_info(output_dir, f"Completed reconciliation keys only: stonebranch_keys={len(sb_ids)} jil_keys={len(jil_ids)}")
+        return ReconciliationKeysWorkflowResult(
+            stonebranch_graph=sb_graph,
+            jil_graph=jil_graph,
+            output_dir=output_dir,
+            summary=summary,
+            files=[sb_path, jil_out_path],
+        )
+    except Exception as exc:
+        log_exception(output_dir, "Reconciliation keys only build", exc)
         raise
 
 

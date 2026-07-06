@@ -231,15 +231,19 @@ def export_reconciliation_keys(
     *,
     patterns: Sequence[str] | None = None,
     traversal: GraphTraversalCache | None = None,
-) -> None:
+) -> list[str]:
     """Write the flat, sorted JSON array of reconciliation ID strings.
 
     The primary reconciliation artifact: one array of plain strings, nothing
     else (no kind wrapper objects, no metadata, no source_file, no hashes),
     so the same logical object on both systems produces a byte-identical
-    line for a plain text/Notepad++ diff.
+    line for a plain text/Notepad++ diff. Returns the written ID list so
+    callers (e.g. the reconciliation-keys-only workflow) can report counts
+    without re-reading the file.
     """
-    write_canonical_json(path, build_reconciliation_ids(graph, patterns, traversal=traversal))
+    ids = build_reconciliation_ids(graph, patterns, traversal=traversal)
+    write_canonical_json(path, ids)
+    return ids
 
 
 def canonical_kind(kind: str) -> str:

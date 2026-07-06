@@ -187,11 +187,21 @@ def comparison_name(value: str) -> str:
 # Each pattern is matched case-insensitively against the end of the name.
 # Config-overridable via `AnalyzerConfig.suffix_strips` / `MappingConfig.suffix_strips`
 # so new migration-tooling suffix conventions are a settings edit, not a code change.
-DEFAULT_SUFFIX_STRIP_PATTERNS: tuple[str, ...] = (
+#
+# Split into two named groups so a caller (e.g. the "reconciliation keys
+# only" workflow/CLI command) can selectively keep Task Monitor objects
+# visible as their own entries instead of folding them onto their twin --
+# some reviewers want to see `-tm` objects during reconciliation to
+# understand the full picture, even though the default behavior collapses
+# them.
+TASK_MONITOR_SUFFIX_PATTERNS: tuple[str, ...] = (
     r"[-_]tm$",
     r"[-_]taskmonitor$",
+)
+HASH_SUFFIX_STRIP_PATTERNS: tuple[str, ...] = (
     r"[-_][0-9a-f]{8,}$",
 )
+DEFAULT_SUFFIX_STRIP_PATTERNS: tuple[str, ...] = TASK_MONITOR_SUFFIX_PATTERNS + HASH_SUFFIX_STRIP_PATTERNS
 
 _MAX_SUFFIX_STRIP_PASSES = 5
 
@@ -243,6 +253,25 @@ COMPARISON_KIND_MAP = {
 def comparison_kind(kind: str) -> str:
     """Return the kind used for cross-system comparison keys."""
     return COMPARISON_KIND_MAP.get(kind, kind)
+
+
+def resolve_suffix_patterns(
+    patterns: Sequence[str] | None,
+    *,
+    keep_task_monitor_suffix: bool = False,
+) -> tuple[str, ...]:
+    """Return the effective suffix-strip pattern list for one export run.
+
+    When `keep_task_monitor_suffix` is True, the `-tm` / `-taskmonitor`
+    patterns are removed from the list (so Task Monitor objects stay as
+    their own, separate reconciliation entries instead of collapsing onto
+    their twin), while any hash-suffix or user-configured patterns are kept.
+    """
+    base = tuple(patterns) if patterns is not None else DEFAULT_SUFFIX_STRIP_PATTERNS
+    if not keep_task_monitor_suffix:
+        return base
+    task_monitor_set = set(TASK_MONITOR_SUFFIX_PATTERNS)
+    return tuple(pattern for pattern in base if pattern not in task_monitor_set)
 
 
 def stable_hash(payload: Any, length: int = 16) -> str:

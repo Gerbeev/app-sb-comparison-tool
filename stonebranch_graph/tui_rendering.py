@@ -53,9 +53,10 @@ OTHER_MENU_ITEMS = [
     ("3", "Compare skeletons", "Compare Stonebranch and JIL canonical skeletons by topology, logic, and strict levels.", "MAIN"),
     ("4", "Run legacy direct compare", "Parse both repositories and compare with the legacy graph engine.", "GRAPH"),
     ("5", "Compare existing graph.json files", "Compare previously generated Stonebranch/JIL graph.json files without reparsing repositories.", "GRAPH"),
-    ("6", "Profile Stonebranch schema", "Generate a safe structure profile of Stonebranch JSON keys and types without values.", "PROFILE"),
-    ("7", "Profile JIL schema", "Generate a safe structure profile of JIL job blocks and attributes.", "PROFILE"),
-    ("8", "Show last output files", "Print the most important files from the last run: manifests, reports, graph.json, metrics, diffs.", "SETUP"),
+    ("6", "Reconciliation keys only", "Write only stonebranch.keys.json / autosys.keys.json for a plain-text/Notepad++ diff. No full graph bundle.", "GRAPH"),
+    ("7", "Profile Stonebranch schema", "Generate a safe structure profile of Stonebranch JSON keys and types without values.", "PROFILE"),
+    ("8", "Profile JIL schema", "Generate a safe structure profile of JIL job blocks and attributes.", "PROFILE"),
+    ("9", "Show last output files", "Print the most important files from the last run: manifests, reports, graph.json, metrics, diffs.", "SETUP"),
     ("0", "Back", "Return to the main menu.", "EXIT"),
 ]
 
@@ -312,6 +313,7 @@ def print_settings_detailed(settings: TuiSettings) -> None:
     print(f"  {color_text('Include raw values:', 'gray')} {flag_text(s.include_raw_values)}")
     print(f"  {color_text('Deep scan:', 'gray')} {flag_text(s.deep_scan)}")
     print(f"  {color_text('Env-aware Stonebranch:', 'gray')} {flag_text(s.env_aware)}")
+    print(f"  {color_text('Keep -tm/task-monitor suffix (Reconciliation keys only):', 'gray')} {flag_text(s.keep_task_monitor_suffix)}")
 
 
 def print_summary(summary: dict[str, Any]) -> None:

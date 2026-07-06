@@ -103,10 +103,12 @@ class TerminalUi:
                 elif choice == "5":
                     self.compare_json()
                 elif choice == "6":
-                    self.profile_stonebranch()
+                    self.reconciliation_keys()
                 elif choice == "7":
-                    self.profile_jil()
+                    self.profile_stonebranch()
                 elif choice == "8":
+                    self.profile_jil()
+                elif choice == "9":
                     self.show_last_files()
                 elif choice == "0":
                     return
@@ -237,6 +239,7 @@ class TerminalUi:
             s.stonebranch_pack_path = str(Path(base_dir) / "stonebranch-pack")
             s.jil_pack_path = str(Path(base_dir) / "jil-pack")
             s.compare_pack_path = str(Path(base_dir) / "compare-pack")
+            s.reconciliation_keys_path = str(Path(base_dir) / "reconciliation-keys")
             self.success("Output folder updated and pack folders auto-filled.")
             self.print_settings_compact()
         else:
@@ -302,6 +305,11 @@ class TerminalUi:
         s.include_raw_values = self.yes_no_key("Include raw command/script values?", s.include_raw_values)
         s.deep_scan = self.yes_no_key("Deep scan Stonebranch strings?", s.deep_scan)
         s.env_aware = self.yes_no_key("Env-aware Stonebranch folder layout?", s.env_aware)
+        s.keep_task_monitor_suffix = self.yes_no_key(
+            "Reconciliation keys: keep -tm/task-monitor suffixed objects as separate entries "
+            "(instead of folding them onto their twin)?",
+            s.keep_task_monitor_suffix,
+        )
         self.success("Parser/output options updated.")
         self.pause()
 
@@ -415,6 +423,19 @@ class TerminalUi:
         self.show_last_files(pause=False)
         self.pause()
 
+    def reconciliation_keys(self) -> None:
+        s = self.ensure_settings_for("reconciliation-keys")
+        if s is None:
+            return
+        out = Path(s.reconciliation_keys_path)
+        result = tui_actions.reconciliation_keys(s, self.config)
+        self.last_summary = result.summary
+        self.last_files = result.files
+        self.success(f"Reconciliation keys created: {out.resolve()}")
+        self.print_summary(self.last_summary)
+        self.show_last_files(pause=False)
+        self.pause()
+
     def profile_stonebranch(self) -> None:
         s = self.ensure_settings_for("profile-stonebranch")
         if s is None:
@@ -467,6 +488,11 @@ class TerminalUi:
                 missing.append("Stonebranch graph.json file")
             if not path_exists(s.jil_graph_json):
                 missing.append("JIL graph.json file")
+        if mode == "reconciliation-keys":
+            if not path_exists(s.stonebranch_path):
+                missing.append("Stonebranch source folder")
+            if not path_exists(s.jil_path):
+                missing.append("JIL source folder")
 
         return missing
 
