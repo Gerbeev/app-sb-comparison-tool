@@ -149,10 +149,13 @@ def add_reconciliation_keys_parser(subparsers: argparse._SubParsersAction[argpar
     parser.add_argument("--include-raw-values", action="store_true")
     parser.add_argument(
         "--keep-task-monitor-suffix",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Do not fold -tm/-taskmonitor-suffixed objects onto their twin; "
-            "keep them as their own separate entries in the key lists."
+            "keep them as their own separate entries, with the full name "
+            "(including -tm), in the key lists. Enabled by default; pass "
+            "--no-keep-task-monitor-suffix to fold -tm twins together instead."
         ),
     )
 
@@ -341,6 +344,8 @@ def handle_reconciliation_keys(args: argparse.Namespace, config: AnalyzerConfig)
     print(f"OK: stonebranch keys={result.summary['stonebranch_keys']} jil keys={result.summary['jil_keys']}")
     if args.keep_task_monitor_suffix:
         print("OK: -tm/-taskmonitor objects kept as separate entries (not folded onto twin)")
+    else:
+        print("OK: -tm/-taskmonitor objects folded onto their twin (--no-keep-task-monitor-suffix)")
     print(f"OK: output={args.output.resolve()}")
     return 0
 

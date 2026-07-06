@@ -91,7 +91,7 @@ def test_build_reconciliation_keys_workflow_writes_only_two_files(tmp_path: Path
 
     assert result.summary["stonebranch_keys"] > 0
     assert result.summary["jil_keys"] > 0
-    assert result.summary["keep_task_monitor_suffix"] is False
+    assert result.summary["keep_task_monitor_suffix"] is True
     assert set(result.files) == {ids_dir / "stonebranch.keys.json", ids_dir / "autosys.keys.json"}
 
 

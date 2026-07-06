@@ -315,7 +315,7 @@ def build_reconciliation_keys(
     env_aware: bool = False,
     deep_scan: bool = False,
     include_raw_values: bool = False,
-    keep_task_monitor_suffix: bool = False,
+    keep_task_monitor_suffix: bool = True,
 ) -> ReconciliationKeysWorkflowResult:
     """Build only the two reconciliation key-list files (no full graph bundle).
 
@@ -326,7 +326,9 @@ def build_reconciliation_keys(
     lets a reviewer keep Task Monitor (`-tm` / `-taskmonitor`) objects as
     their own separate entries instead of folding them onto their twin --
     useful when they're needed to understand the full picture during a
-    reconciliation pass.
+    reconciliation pass. Defaults to True so object names are exported in
+    full (including `-tm`) unless a caller explicitly opts into folding twins
+    together by passing `keep_task_monitor_suffix=False`.
     """
     log_info(output_dir, f"Starting reconciliation keys only: stonebranch={stonebranch_path} jil={jil_path} env={env}")
     try:

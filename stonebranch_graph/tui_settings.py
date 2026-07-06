@@ -23,7 +23,7 @@ class TuiSettings:
     include_raw_values: bool = False
     deep_scan: bool = False
     env_aware: bool = False
-    keep_task_monitor_suffix: bool = False
+    keep_task_monitor_suffix: bool = True
     reconciliation_keys_path: str = "out/reconciliation-keys"
 
 
