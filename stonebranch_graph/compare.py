@@ -809,7 +809,7 @@ def build_risks(comparison: Comparison) -> list[str]:
     if s.get("stonebranch_key_collision_count", 0) or s.get("jil_key_collision_count", 0):
         risks.append("Normalized node key collisions detected, including possible enterprise-name collisions. Some matches were excluded to avoid false positives.")
     if s.get("unused_mapping_count", 0):
-        risks.append("Some manual mapping rules were not used. Check mapping-diagnostics.csv.")
+        risks.append("Some manual mapping rules were not used. Check csv/mapping-diagnostics.csv.")
     if s.get("migration_readiness_score", 100) < 70:
         risks.append("Migration readiness score is below 70. Manual review is required before production use.")
     return risks
@@ -823,18 +823,20 @@ def export_comparison(
 ) -> None:
     compare_dir = output_dir / "compare"
     compare_dir.mkdir(parents=True, exist_ok=True)
-    write_json(compare_dir / "comparison.json", comparison.to_dict())
-    write_json(compare_dir / "metrics.json", comparison.summary)
-    export_csv_rows(compare_dir / "metrics.csv", ["metric", "value"], metric_rows(comparison.summary))
+    json_dir = compare_dir / "json"
+    csv_dir = compare_dir / "csv"
+    write_json(json_dir / "comparison.json", comparison.to_dict())
+    write_json(json_dir / "metrics.json", comparison.summary)
+    export_csv_rows(csv_dir / "metrics.csv", ["metric", "value"], metric_rows(comparison.summary))
     write_report(compare_dir / "report.md", comparison)
-    write_missing_csvs(compare_dir, comparison)
-    write_edge_diff_csv(compare_dir, comparison)
-    write_command_diff_csv(compare_dir, comparison)
-    write_diagnostics_csv(compare_dir, comparison)
-    write_diff_index(compare_dir, comparison)
-    write_critical_diff(compare_dir, comparison)
-    write_remediation_plan(compare_dir, comparison)
-    export_reconciliation_report(comparison, compare_dir / "reconciliation.json")
+    write_missing_csvs(csv_dir, comparison)
+    write_edge_diff_csv(csv_dir, comparison)
+    write_command_diff_csv(csv_dir, comparison)
+    write_diagnostics_csv(csv_dir, comparison)
+    write_diff_index(json_dir, comparison)
+    write_critical_diff(json_dir, comparison)
+    write_remediation_plan(compare_dir, json_dir, comparison)
+    export_reconciliation_report(comparison, json_dir / "reconciliation.json")
     from .html_graph import export_comparison_html_report
     export_comparison_html_report(comparison, stonebranch, jil, output_dir)
 
@@ -1140,7 +1142,7 @@ def write_critical_diff(compare_dir: Path, comparison: Comparison) -> None:
     write_json(compare_dir / "critical-diff.json", critical)
 
 
-def write_remediation_plan(compare_dir: Path, comparison: Comparison) -> None:
+def write_remediation_plan(compare_dir: Path, json_dir: Path, comparison: Comparison) -> None:
     lines = [
         "# Remediation plan",
         "",
@@ -1189,7 +1191,7 @@ def write_remediation_plan(compare_dir: Path, comparison: Comparison) -> None:
     for item in comparison.attributes.get("condition_differences", [])[:500]:
         lines.append(f"- [ ] Compare condition for `{item.get('key')}`.")
 
-    write_json(compare_dir / "remediation-summary.json", {
+    write_json(json_dir / "remediation-summary.json", {
         "missing_in_stonebranch": len(comparison.nodes.get("missing_in_stonebranch", [])),
         "missing_in_jil": len(comparison.nodes.get("missing_in_jil", [])),
         "missing_edges_in_stonebranch": len(comparison.edges.get("missing_in_stonebranch", [])),

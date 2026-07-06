@@ -8,7 +8,7 @@ version = "0.6.0"
 description = "Build and compare dependency graphs from Stonebranch JSON exports and AutoSys JIL files."
 readme = "README.md"
 license = { text = "MIT" }
-keywords = ["stonebranch", "autosys", "jil", "dependency-graph", "migration"]
+keywords = ["stonebranch", "autosys", "jil", "dependencies", "migration"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",

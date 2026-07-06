@@ -60,8 +60,8 @@ def create_triage_report(compare_output: Path, output_dir: Path | None = None) -
     output = output_dir or compare_dir
     output.mkdir(parents=True, exist_ok=True)
 
-    comparison = load_json_file(compare_dir / "comparison.json")
-    metrics = load_json_file(compare_dir / "metrics.json")
+    comparison = load_json_file(compare_json_path(compare_dir, "comparison.json"))
+    metrics = load_json_file(compare_json_path(compare_dir, "metrics.json"))
     findings = collect_triage_findings(compare_dir, comparison, metrics)
     summary = build_triage_summary(findings, comparison, metrics)
 
@@ -74,9 +74,16 @@ def create_triage_report(compare_output: Path, output_dir: Path | None = None) -
 def resolve_compare_dir(path: Path) -> Path:
     candidates = [path, path / "compare"]
     for candidate in candidates:
-        if (candidate / "comparison.json").exists():
+        if (candidate / "json" / "comparison.json").exists() or (candidate / "comparison.json").exists():
             return candidate
-    raise FileNotFoundError(f"No compare/comparison.json or comparison.json found under: {path}")
+    raise FileNotFoundError(f"No compare/json/comparison.json or comparison.json found under: {path}")
+
+
+def compare_json_path(compare_dir: Path, name: str) -> Path:
+    current = compare_dir / "json" / name
+    if current.exists():
+        return current
+    return compare_dir / name
 
 
 def load_json_file(path: Path) -> dict[str, Any]:
@@ -138,7 +145,7 @@ def collision_findings(comparison: dict[str, Any]) -> list[TriageFinding]:
                     side=side,
                     key=str(item.get("key", "")),
                     object=names,
-                    review_file="compare/collisions.csv",
+                    review_file="compare/csv/collisions.csv",
                     reason=reason,
                     details=compact_details({"business_codes": business_codes, "env_tokens": env_tokens}),
                 )
@@ -168,7 +175,7 @@ def edge_gap_findings(comparison: dict[str, Any]) -> list[TriageFinding]:
                     key=str(edge.get("key", "")),
                     source=node_label(edge.get("source")),
                     target=node_label(edge.get("target")),
-                    review_file="compare/edge-diff.csv",
+                    review_file="compare/csv/edge-diff.csv",
                     reason="Missing normalized edge in comparison.",
                     details=compact_details({"evidence_file": edge.get("evidence_file", ""), "evidence_key": edge.get("evidence_key", "")}),
                 )
@@ -180,8 +187,8 @@ def object_gap_findings(comparison: dict[str, Any]) -> list[TriageFinding]:
     nodes = comparison_section(comparison, "nodes")
     findings: list[TriageFinding] = []
     for section, side, review_file in (
-        ("missing_in_stonebranch", "missing_in_stonebranch", "compare/missing-in-stonebranch.csv"),
-        ("missing_in_jil", "missing_in_jil", "compare/missing-in-jil.csv"),
+        ("missing_in_stonebranch", "missing_in_stonebranch", "compare/csv/missing-in-stonebranch.csv"),
+        ("missing_in_jil", "missing_in_jil", "compare/csv/missing-in-jil.csv"),
     ):
         for item in list_section(nodes, section):
             findings.append(
@@ -213,7 +220,7 @@ def command_findings(comparison: dict[str, Any]) -> list[TriageFinding]:
                 status="syntax_mapping_review" if syntax_only else "real_command_review_required",
                 key=str(item.get("key", "")),
                 object=f"{item.get('stonebranch', '')} / {item.get('jil', '')}",
-                review_file="compare/command-diff.csv",
+                review_file="compare/csv/command-diff.csv",
                 reason=str(item.get("reason", "")),
                 details=compact_details(
                     {
@@ -236,7 +243,7 @@ def condition_findings(comparison: dict[str, Any]) -> list[TriageFinding]:
             category="condition_mismatch",
             status="condition_logic_review_required",
             key=str(item.get("key", "")),
-            review_file="compare/comparison.json",
+            review_file="compare/json/comparison.json",
             reason="Matched objects have different condition hashes.",
         )
         for item in list_section(attributes, "condition_differences")
@@ -252,7 +259,7 @@ def mapping_findings(comparison: dict[str, Any]) -> list[TriageFinding]:
             status="unused_mapping_review",
             key=str(item.get("from", item.get("key", ""))),
             object=str(item.get("to", "")),
-            review_file="compare/mapping-diagnostics.csv",
+            review_file="compare/csv/mapping-diagnostics.csv",
             reason="Manual mapping rule was not used during comparison.",
         )
         for item in list_section(diagnostics, "unused_mappings")
@@ -299,7 +306,7 @@ def readiness_findings(metrics: dict[str, Any]) -> list[TriageFinding]:
             severity="high",
             category="readiness_score",
             status="baseline_not_ready",
-            review_file="compare/metrics.json",
+            review_file="compare/json/metrics.json",
             reason=f"Migration readiness score is below 70: {score}/100.",
         )
     ]

@@ -138,7 +138,7 @@ def add_compare_skeleton_parser(subparsers: argparse._SubParsersAction[argparse.
 def add_reconciliation_keys_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser(
         "reconciliation-keys",
-        help="Build only stonebranch.keys.json / autosys.keys.json for a plain-text/Notepad++ diff.",
+        help="Build only ids/stonebranch.keys.json and ids/autosys.keys.json for a plain-text/Notepad++ diff.",
     )
     parser.add_argument("--stonebranch", type=Path, required=True)
     parser.add_argument("--jil", type=Path, required=True)
@@ -190,7 +190,7 @@ def add_existing_graph_compare_parser(subparsers: argparse._SubParsersAction[arg
 
 def add_triage_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("triage", help="Create a dry-run triage report from comparison outputs.")
-    parser.add_argument("compare_output", type=Path, help="Comparison pack folder or compare/ folder containing comparison.json.")
+    parser.add_argument("compare_output", type=Path, help="Comparison pack folder or compare/ folder containing json/comparison.json.")
     parser.add_argument("-o", "--output", type=Path, default=None, help="Optional output folder. Defaults to the compare/ folder.")
 
 

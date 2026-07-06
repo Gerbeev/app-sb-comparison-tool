@@ -29,8 +29,8 @@ PALETTE = {
 
 
 MAIN_MENU_ITEMS = [
-    ("1", "Build Stonebranch analysis pack", "Create a full Stonebranch pack: graph.json, indexes, graph views, metrics, and source-side reports.", "PACK"),
-    ("2", "Build JIL analysis pack", "Create a full JIL pack: graph.json, indexes, graph views, metrics, and source-side reports.", "PACK"),
+    ("1", "Build Stonebranch analysis pack", "Create a full Stonebranch pack: json/graph.json, csv, ids, indexes, metrics, and source-side reports.", "PACK"),
+    ("2", "Build JIL analysis pack", "Create a full JIL pack: json/graph.json, csv, ids, indexes, metrics, and source-side reports.", "PACK"),
     ("3", "Compare analysis packs", "Compare Stonebranch/JIL pack folders and produce detailed gaps, critical diffs, and remediation checklist.", "MAIN"),
     ("4", "Settings", "Open simple setup first, with advanced mapping, parser options, and save/load in More settings.", "SETUP"),
     ("5", "Other tools", "Direct compare, compare graph.json files, schema profiles, and last output file list.", "OTHER"),
@@ -53,7 +53,7 @@ OTHER_MENU_ITEMS = [
     ("3", "Compare skeletons", "Compare Stonebranch and JIL canonical skeletons by topology, logic, and strict levels.", "MAIN"),
     ("4", "Run legacy direct compare", "Parse both repositories and compare with the legacy graph engine.", "GRAPH"),
     ("5", "Compare existing graph.json files", "Compare previously generated Stonebranch/JIL graph.json files without reparsing repositories.", "GRAPH"),
-    ("6", "Reconciliation keys only", "Write only stonebranch.keys.json / autosys.keys.json for a plain-text/Notepad++ diff. No full graph bundle.", "GRAPH"),
+    ("6", "Reconciliation keys only", "Write only ids/stonebranch.keys.json and ids/autosys.keys.json for a plain-text/Notepad++ diff. No full graph bundle.", "GRAPH"),
     ("7", "Profile Stonebranch schema", "Generate a safe structure profile of Stonebranch JSON keys and types without values.", "PROFILE"),
     ("8", "Profile JIL schema", "Generate a safe structure profile of JIL job blocks and attributes.", "PROFILE"),
     ("9", "Show last output files", "Print the most important files from the last run: manifests, reports, graph.json, metrics, diffs.", "SETUP"),
@@ -211,7 +211,7 @@ def _pack_status(path_value: str) -> str:
     if not path_value:
         return "MISSING"
     path = Path(path_value)
-    if (path / "graph.json").exists():
+    if (path / "json" / "graph.json").exists() or (path / "graph.json").exists():
         return "READY"
     return "INCOMPLETE" if path.exists() else "NOT BUILT"
 
@@ -220,7 +220,11 @@ def _comparison_status(path_value: str) -> str:
     if not path_value:
         return "MISSING"
     path = Path(path_value)
-    if (path / "compare" / "report.md").exists() or (path / "compare" / "comparison.json").exists():
+    if (
+        (path / "compare" / "report.md").exists()
+        or (path / "compare" / "json" / "comparison.json").exists()
+        or (path / "compare" / "comparison.json").exists()
+    ):
         return "READY"
     return "INCOMPLETE" if path.exists() else "NOT BUILT"
 

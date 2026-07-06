@@ -82,16 +82,17 @@ def test_build_reconciliation_keys_workflow_writes_only_two_files(tmp_path: Path
         env="PROD",
     )
 
-    written = {p.name for p in tmp_path.iterdir() if p.suffix == ".json"}
+    ids_dir = tmp_path / "ids"
+    written = {p.name for p in ids_dir.iterdir() if p.suffix == ".json"}
     assert written == {"stonebranch.keys.json", "autosys.keys.json"}
     # No full graph bundle: no graph.json, no graph.html, no containers, etc.
-    assert not (tmp_path / "graph.json").exists()
+    assert not (tmp_path / "json" / "graph.json").exists()
     assert not (tmp_path / "graph.html").exists()
 
     assert result.summary["stonebranch_keys"] > 0
     assert result.summary["jil_keys"] > 0
     assert result.summary["keep_task_monitor_suffix"] is False
-    assert set(result.files) == {tmp_path / "stonebranch.keys.json", tmp_path / "autosys.keys.json"}
+    assert set(result.files) == {ids_dir / "stonebranch.keys.json", ids_dir / "autosys.keys.json"}
 
 
 def test_build_reconciliation_keys_workflow_toggle_changes_output(tmp_path: Path) -> None:
@@ -115,8 +116,8 @@ def test_build_reconciliation_keys_workflow_toggle_changes_output(tmp_path: Path
         keep_task_monitor_suffix=True,
     )
 
-    default_sb_keys = json.loads((default_dir / "stonebranch.keys.json").read_text(encoding="utf-8"))
-    kept_sb_keys = json.loads((kept_dir / "stonebranch.keys.json").read_text(encoding="utf-8"))
+    default_sb_keys = json.loads((default_dir / "ids" / "stonebranch.keys.json").read_text(encoding="utf-8"))
+    kept_sb_keys = json.loads((kept_dir / "ids" / "stonebranch.keys.json").read_text(encoding="utf-8"))
     # Both runs are valid regardless of whether the bundled examples happen
     # to exercise the -tm suffix; the toggle must at least be threaded
     # through end-to-end and recorded in the summary.

@@ -34,7 +34,6 @@ from .domain import (
     SYSTEM_SPECIFIC_KINDS,
 )
 from .metrics import GraphMetrics, compute_graph_metrics, metric_rows, metrics_to_dict
-from .rendering import escape_dot
 
 TOP_LEVEL_GRAPH_MAX_EDGES = 800
 
@@ -89,27 +88,29 @@ def export_graph_bundle(
     config: AnalyzerConfig | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    json_dir = output_dir / "json"
+    csv_dir = output_dir / "csv"
+    ids_dir = output_dir / "ids"
     traversal = traversal or GraphTraversalCache.build(graph)
     graph_metrics = compute_graph_metrics(graph, traversal=traversal)
-    write_json(output_dir / "graph.json", graph.to_dict())
-    export_canonical_graph_json(graph, output_dir / "canonical-graph.json", traversal=traversal)
+    write_json(json_dir / "graph.json", graph.to_dict())
+    export_canonical_graph_json(graph, json_dir / "canonical-graph.json", traversal=traversal)
     from .html_graph import export_cytoscape_html_report
     export_cytoscape_html_report(graph, output_dir, traversal=traversal)
-    export_containers_json(graph, output_dir / "containers.json", traversal=traversal)
-    export_containers_csv(graph, output_dir / "containers.csv", traversal=traversal)
-    export_nodes_csv(graph, output_dir / "objects.csv", traversal=traversal)
-    export_edges_csv(graph, output_dir / "edges.csv", traversal=traversal)
-    export_dot(graph, output_dir / "dependency-graph.dot", max_edges=max_graph_edges, traversal=traversal)
+    export_containers_json(graph, json_dir / "containers.json", traversal=traversal)
+    export_containers_csv(graph, csv_dir / "containers.csv", traversal=traversal)
+    export_nodes_csv(graph, csv_dir / "objects.csv", traversal=traversal)
+    export_edges_csv(graph, csv_dir / "edges.csv", traversal=traversal)
     suffix_patterns = (config or AnalyzerConfig.default()).suffix_strips
     export_reconciliation_keys(
         graph,
-        output_dir / reconciliation_keys_filename(graph.source_system),
+        ids_dir / reconciliation_keys_filename(graph.source_system),
         patterns=suffix_patterns,
         traversal=traversal,
     )
     metrics_payload = metrics_to_dict(graph_metrics)
-    write_json(output_dir / "metrics.json", metrics_payload)
-    export_csv_rows(output_dir / "metrics.csv", METRICS_CSV_FIELDS, metric_rows(metrics_payload))
+    write_json(json_dir / "metrics.json", metrics_payload)
+    export_csv_rows(csv_dir / "metrics.csv", METRICS_CSV_FIELDS, metric_rows(metrics_payload))
     export_report(
         graph,
         output_dir / "report.md",
@@ -550,40 +551,6 @@ def export_edges_csv(graph: Graph, path: Path, *, traversal: GraphTraversalCache
             writer.writerow(edge.__dict__)
 
 
-def export_dot(
-    graph: Graph,
-    path: Path,
-    *,
-    max_edges: int | None = TOP_LEVEL_GRAPH_MAX_EDGES,
-    traversal: GraphTraversalCache | None = None,
-) -> None:
-    traversal = traversal or GraphTraversalCache.build(graph)
-    matching_edges = traversal.sorted_edges
-    capped = max_edges is not None and len(matching_edges) > max_edges
-    visible_edges = matching_edges[:max_edges] if capped else matching_edges
-    visible_node_ids = {edge.source for edge in visible_edges} | {edge.target for edge in visible_edges}
-    if not visible_edges:
-        visible_node_ids = set(graph.nodes)
-
-    lines = []
-    if capped:
-        lines.append(f"// Graph view capped at {max_edges} of {len(matching_edges)} edges. Use graph.json or edges.csv for the full dependency graph.")
-    lines.extend(["digraph dependencies {", "  rankdir=LR;"])
-    if capped:
-        note = f"Graph view capped at {max_edges} of {len(matching_edges)} edges. Use graph.json or edges.csv for the full graph."
-        lines.append(f'  "__export_note" [label="{escape_dot(note)}", shape=note];')
-    for node in (node for node in traversal.sorted_nodes if node.id in visible_node_ids):
-        label = f"{node.source_system}/{node.env}/{node.kind}: {node.name}"
-        lines.append(f'  "{escape_dot(node.id)}" [label="{escape_dot(label)}"];')
-    for edge in visible_edges:
-        lines.append(
-            f'  "{escape_dot(edge.source)}" -> "{escape_dot(edge.target)}" '
-            f'[label="{escape_dot(edge.relation)}"];'
-        )
-    lines.append("}")
-    write_text_file(path, "\n".join(lines) + "\n")
-
-
 def export_report(
     graph: Graph,
     path: Path,
@@ -644,15 +611,9 @@ def append_capped_graph_note(lines: list[str], graph: Graph, graph_view_max_edge
             "",
             "## Graph views",
             "",
-            "- Mermaid `.mmd` graph exports have been fully decommissioned.",
-            "- Use `graph.html` for the offline Cytoscape HTML graph report. Use `canonical-graph.json`, `containers.json`, `objects.csv`, and `edges.csv` for deterministic graph review.",
+            "- Use `graph.html` for the offline interactive graph report.",
+            "- Use `json/canonical-graph.json`, `json/containers.json`, `csv/objects.csv`, and `csv/edges.csv` for deterministic graph review.",
         ]
-    )
-    if graph_view_max_edges is None or len(graph.edges) <= graph_view_max_edges:
-        return
-    lines.append(
-        f"- `dependency-graph.dot` is capped at **{graph_view_max_edges}** of **{len(graph.edges)}** edges. "
-        "Use `graph.json` or `edges.csv` for the full dependency graph."
     )
 
 

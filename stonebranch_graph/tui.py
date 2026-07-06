@@ -36,6 +36,13 @@ from .tui_settings import (
 )
 
 
+def _pack_graph_exists(path_value: str) -> bool:
+    if not path_exists(path_value):
+        return False
+    path = Path(path_value)
+    return (path / "json" / "graph.json").exists() or (path / "graph.json").exists()
+
+
 class TerminalUi:
     def __init__(self) -> None:
         self.config = AnalyzerConfig.default()
@@ -479,9 +486,9 @@ class TerminalUi:
         } and not path_exists(s.jil_path):
             missing.append("JIL source folder")
         if mode == "compare-packs":
-            if not (path_exists(s.stonebranch_pack_path) and (Path(s.stonebranch_pack_path) / "graph.json").exists()):
+            if not _pack_graph_exists(s.stonebranch_pack_path):
                 missing.append("Stonebranch analysis pack folder with graph.json")
-            if not (path_exists(s.jil_pack_path) and (Path(s.jil_pack_path) / "graph.json").exists()):
+            if not _pack_graph_exists(s.jil_pack_path):
                 missing.append("JIL analysis pack folder with graph.json")
         if mode == "compare-json":
             if not path_exists(s.stonebranch_graph_json):

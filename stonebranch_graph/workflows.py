@@ -91,22 +91,21 @@ class ReconciliationKeysWorkflowResult:
 def graph_bundle_files(output_dir: Path, source_system: str | None = None) -> list[Path]:
     files = [
         output_dir / "report.md",
-        output_dir / "graph.json",
-        output_dir / "canonical-graph.json",
+        output_dir / "json" / "graph.json",
+        output_dir / "json" / "canonical-graph.json",
         output_dir / "graph.html",
         output_dir / "graph-data.js",
-        output_dir / "graph-data.json",
+        output_dir / "json" / "graph-data.json",
         output_dir / "cytoscape.min.js",
-        output_dir / "cytoscape.LICENSE",
-        output_dir / "containers.json",
-        output_dir / "containers.csv",
-        output_dir / "metrics.json",
-        output_dir / "objects.csv",
-        output_dir / "edges.csv",
-        output_dir / "dependency-graph.dot",
+        output_dir / "json" / "containers.json",
+        output_dir / "csv" / "containers.csv",
+        output_dir / "json" / "metrics.json",
+        output_dir / "csv" / "metrics.csv",
+        output_dir / "csv" / "objects.csv",
+        output_dir / "csv" / "edges.csv",
     ]
     if source_system:
-        files.append(output_dir / reconciliation_keys_filename(source_system))
+        files.append(output_dir / "ids" / reconciliation_keys_filename(source_system))
     return files
 
 
@@ -119,31 +118,35 @@ def skeleton_bundle_files(output_dir: Path) -> list[Path]:
         output_dir / "skeleton-graph-data.js",
         output_dir / "skeleton-graph-data.json",
         output_dir / "cytoscape.min.js",
-        output_dir / "cytoscape.LICENSE",
     ]
 
 
 def analysis_pack_files(output_dir: Path, source_system: str | None = None) -> list[Path]:
     files = [
         output_dir / "README.md",
-        output_dir / "pack-manifest.json",
+        output_dir / "json" / "pack-manifest.json",
         output_dir / "report.md",
-        output_dir / "graph.json",
-        output_dir / "canonical-graph.json",
+        output_dir / "json" / "graph.json",
+        output_dir / "json" / "canonical-graph.json",
         output_dir / "graph.html",
         output_dir / "graph-data.js",
-        output_dir / "graph-data.json",
+        output_dir / "json" / "graph-data.json",
         output_dir / "cytoscape.min.js",
-        output_dir / "cytoscape.LICENSE",
-        output_dir / "containers.json",
-        output_dir / "containers.csv",
-        output_dir / "metrics.json",
+        output_dir / "json" / "containers.json",
+        output_dir / "csv" / "containers.csv",
+        output_dir / "json" / "metrics.json",
+        output_dir / "csv" / "metrics.csv",
+        output_dir / "csv" / "objects.csv",
+        output_dir / "csv" / "edges.csv",
+        output_dir / "csv" / "object-summary.csv",
+        output_dir / "csv" / "relation-summary.csv",
         output_dir / "indexes" / "node-index.json",
-        output_dir / "graphs" / "README.md",
+        output_dir / "reports" / "README.md",
         output_dir / "reports" / "top-connected.md",
+        output_dir / "reports" / "orphans.md",
     ]
     if source_system:
-        files.append(output_dir / reconciliation_keys_filename(source_system))
+        files.append(output_dir / "ids" / reconciliation_keys_filename(source_system))
     return files
 
 
@@ -151,30 +154,29 @@ def comparison_files(output_dir: Path) -> list[Path]:
     compare_dir = output_dir / "compare"
     return [
         compare_dir / "report.md",
-        compare_dir / "comparison.json",
-        compare_dir / "metrics.json",
-        compare_dir / "metrics.csv",
-        compare_dir / "edge-diff.csv",
-        compare_dir / "command-diff.csv",
+        compare_dir / "json" / "comparison.json",
+        compare_dir / "json" / "metrics.json",
+        compare_dir / "csv" / "metrics.csv",
+        compare_dir / "csv" / "edge-diff.csv",
+        compare_dir / "csv" / "command-diff.csv",
         compare_dir / "compare-graph.html",
         compare_dir / "compare-graph-data.js",
-        compare_dir / "compare-graph-data.json",
+        compare_dir / "json" / "compare-graph-data.json",
         compare_dir / "cytoscape.min.js",
-        compare_dir / "cytoscape.LICENSE",
-        compare_dir / "missing-in-stonebranch.csv",
-        compare_dir / "missing-in-jil.csv",
-        compare_dir / "collisions.csv",
-        compare_dir / "mapping-diagnostics.csv",
-        compare_dir / "diff-index.json",
-        compare_dir / "critical-diff.json",
-        compare_dir / "remediation-summary.json",
+        compare_dir / "csv" / "missing-in-stonebranch.csv",
+        compare_dir / "csv" / "missing-in-jil.csv",
+        compare_dir / "csv" / "collisions.csv",
+        compare_dir / "csv" / "mapping-diagnostics.csv",
+        compare_dir / "json" / "diff-index.json",
+        compare_dir / "json" / "critical-diff.json",
+        compare_dir / "json" / "remediation-summary.json",
         compare_dir / "remediation-plan.md",
-        compare_dir / "reconciliation.json",
+        compare_dir / "json" / "reconciliation.json",
     ]
 
 
 def comparison_pack_files(output_dir: Path) -> list[Path]:
-    return [output_dir / "compare-pack-manifest.json", *comparison_files(output_dir)]
+    return [output_dir / "json" / "compare-pack-manifest.json", *comparison_files(output_dir)]
 
 
 def skeleton_comparison_files(output_dir: Path) -> list[Path]:
@@ -187,7 +189,6 @@ def skeleton_comparison_files(output_dir: Path) -> list[Path]:
         output_dir / "stonebranch" / "skeleton-graph-data.js",
         output_dir / "stonebranch" / "skeleton-graph-data.json",
         output_dir / "stonebranch" / "cytoscape.min.js",
-        output_dir / "stonebranch" / "cytoscape.LICENSE",
         output_dir / "jil" / "skeleton.jsonl",
         output_dir / "jil" / "skeleton-canonical.jsonl",
         output_dir / "jil" / "skeleton-index.csv",
@@ -195,7 +196,6 @@ def skeleton_comparison_files(output_dir: Path) -> list[Path]:
         output_dir / "jil" / "skeleton-graph-data.js",
         output_dir / "jil" / "skeleton-graph-data.json",
         output_dir / "jil" / "cytoscape.min.js",
-        output_dir / "jil" / "cytoscape.LICENSE",
         compare_dir / "skeleton-stonebranch.jsonl",
         compare_dir / "skeleton-jil.jsonl",
         compare_dir / "skeleton-diff.json",
@@ -203,7 +203,6 @@ def skeleton_comparison_files(output_dir: Path) -> list[Path]:
         compare_dir / "skeleton-compare-graph-data.js",
         compare_dir / "skeleton-compare-graph-data.json",
         compare_dir / "cytoscape.min.js",
-        compare_dir / "cytoscape.LICENSE",
         compare_dir / "skeleton-index.csv",
         compare_dir / "report.md",
         compare_dir / "remediation-plan.md",
@@ -301,8 +300,8 @@ def build_jil_graph(
 
 def reconciliation_keys_files(output_dir: Path, stonebranch_source: str, jil_source: str) -> list[Path]:
     return [
-        output_dir / reconciliation_keys_filename(stonebranch_source),
-        output_dir / reconciliation_keys_filename(jil_source),
+        output_dir / "ids" / reconciliation_keys_filename(stonebranch_source),
+        output_dir / "ids" / reconciliation_keys_filename(jil_source),
     ]
 
 
@@ -322,7 +321,7 @@ def build_reconciliation_keys(
 
     A lightweight sibling of `compare_direct` for the common "just give me
     the two diff-ready files" workflow: parses both sides and writes
-    `stonebranch.keys.json` / `autosys.keys.json` straight to `output_dir`,
+    `ids/stonebranch.keys.json` / `ids/autosys.keys.json` under `output_dir`,
     skipping graph.html/containers/metrics/etc. `keep_task_monitor_suffix`
     lets a reviewer keep Task Monitor (`-tm` / `-taskmonitor`) objects as
     their own separate entries instead of folding them onto their twin --
@@ -337,8 +336,9 @@ def build_reconciliation_keys(
         jil_graph = AutosysJilParser(runtime_config, env=env).parse(jil_path)
         patterns = resolve_suffix_patterns(runtime_config.suffix_strips, keep_task_monitor_suffix=keep_task_monitor_suffix)
 
-        sb_path = output_dir / reconciliation_keys_filename(sb_graph.source_system)
-        jil_out_path = output_dir / reconciliation_keys_filename(jil_graph.source_system)
+        ids_dir = output_dir / "ids"
+        sb_path = ids_dir / reconciliation_keys_filename(sb_graph.source_system)
+        jil_out_path = ids_dir / reconciliation_keys_filename(jil_graph.source_system)
         sb_ids = export_reconciliation_keys(sb_graph, sb_path, patterns=patterns)
         jil_ids = export_reconciliation_keys(jil_graph, jil_out_path, patterns=patterns)
 
@@ -657,7 +657,7 @@ def compare_packs(
             config=config,
             mapping_path=mapping_path,
         )
-        metrics_path = output_dir / "compare" / "metrics.json"
+        metrics_path = output_dir / "compare" / "json" / "metrics.json"
         summary = json.loads(metrics_path.read_text(encoding="utf-8")) if metrics_path.exists() else {}
         log_info(output_dir, "Completed analysis pack comparison")
         return CompareWorkflowResult(

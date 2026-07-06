@@ -33,6 +33,11 @@ python -m stonebranch_graph.cli build-stonebranch <source-folder> --output <outp
 
 Run `python -m stonebranch_graph.cli --help` for the full list of subcommands.
 
+Generated analysis packs keep machine-readable JSON under `json/`, tabular CSV
+exports under `csv/`, reconciliation key lists under `ids/`, and technical lookup
+indexes under `indexes/`. The legacy `reports/` folder is still emitted for now,
+but it is marked obsolete in each pack.
+
 ## Isolated / offline environments
 
 - Set `SB_TOOL_NO_NATIVE_DIALOG=1` to skip the native OS folder/file picker entirely

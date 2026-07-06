@@ -47,8 +47,7 @@ def create_analysis_pack(
         env_aware=env_aware,
     )
     write_indexes(graph, output_dir / "indexes", traversal=traversal)
-    write_graph_views(output_dir / "graphs")
-    write_detailed_reports(graph, output_dir / "reports", traversal=traversal)
+    write_detailed_reports(graph, output_dir / "reports", output_dir / "csv", traversal=traversal)
     write_pack_readme(graph, output_dir, pack_type)
 
 
@@ -70,10 +69,17 @@ def write_pack_manifest(
         "env": env,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source_path": str(source_path),
-        "graph_file": "graph.json",
-        "metrics_file": "metrics.json",
-        "objects_file": "objects.csv",
-        "edges_file": "edges.csv",
+        "graph_file": "json/graph.json",
+        "metrics_file": "json/metrics.json",
+        "objects_file": "csv/objects.csv",
+        "edges_file": "csv/edges.csv",
+        "ids_file": f"ids/{reconciliation_keys_filename(graph.source_system)}",
+        "deprecated_outputs": {
+            "reports": {
+                "status": "obsolete",
+                "note": "The reports/ folder and nested report files are kept for now and are scheduled for decommissioning.",
+            }
+        },
         "settings": {
             "include_raw_values": include_raw_values,
             "deep_scan": deep_scan,
@@ -86,24 +92,27 @@ def write_pack_manifest(
         "important_files": [
             "README.md",
             "report.md",
-            "graph.json",
-            "canonical-graph.json",
-            reconciliation_keys_filename(graph.source_system),
+            "json/pack-manifest.json",
+            "json/graph.json",
+            "json/canonical-graph.json",
+            f"ids/{reconciliation_keys_filename(graph.source_system)}",
             "graph.html",
             "graph-data.js",
             "cytoscape.min.js",
-            "cytoscape.LICENSE",
-            "containers.json",
-            "containers.csv",
-            "metrics.json",
+            "json/containers.json",
+            "csv/containers.csv",
+            "json/metrics.json",
+            "csv/metrics.csv",
+            "csv/objects.csv",
+            "csv/edges.csv",
+            "json/graph-data.json",
             "indexes/node-index.json",
             "indexes/adjacency.json",
-            "graphs/README.md",
             "reports/top-connected.md",
             "reports/orphans.md",
         ],
     }
-    write_json(output_dir / "pack-manifest.json", manifest)
+    write_json(output_dir / "json" / "pack-manifest.json", manifest)
 
 
 def write_indexes(graph: Graph, index_dir: Path, *, traversal: GraphTraversalCache | None = None) -> None:
@@ -160,21 +169,24 @@ def write_indexes(graph: Graph, index_dir: Path, *, traversal: GraphTraversalCac
     write_json(index_dir / "reverse-adjacency.json", dict(sorted(reverse_adjacency.items())))
 
 
-def write_graph_views(graph_dir: Path) -> None:
-    graph_dir.mkdir(parents=True, exist_ok=True)
-    write_text_file(
-        graph_dir / "README.md",
-        "# Graph views\n\n"
-        "Mermaid `.mmd` graph exports have been fully decommissioned.\n\n"
-        "Use the pack-level `graph.html` offline Cytoscape HTML graph report for interactive visual navigation. Use `canonical-graph.json`, `containers.json`, `objects.csv`, `edges.csv`, and `dependency-graph.dot` for deterministic graph review and diff tools.\n",
-    )
-
-
-def write_detailed_reports(graph: Graph, reports_dir: Path, *, traversal: GraphTraversalCache | None = None) -> None:
+def write_detailed_reports(
+    graph: Graph,
+    reports_dir: Path,
+    csv_dir: Path,
+    *,
+    traversal: GraphTraversalCache | None = None,
+) -> None:
     reports_dir.mkdir(parents=True, exist_ok=True)
+    csv_dir.mkdir(parents=True, exist_ok=True)
     traversal = traversal or GraphTraversalCache.build(graph)
     inbound = traversal.inbound
     outbound = traversal.outbound
+
+    write_text_file(
+        reports_dir / "README.md",
+        "# Obsolete Reports Folder\n\n"
+        "This folder is obsolete and scheduled for decommissioning. Prefer the pack-level `report.md`, `json/`, `csv/`, `ids/`, and `indexes/` outputs.\n",
+    )
 
     top_connected = sorted(
         traversal.sorted_nodes,
@@ -216,13 +228,13 @@ def write_detailed_reports(graph: Graph, reports_dir: Path, *, traversal: GraphT
         {"relation": relation, "count": count}
         for relation, count in sorted(traversal.relation_counts.items(), key=lambda item: (-item[1], item[0]))
     )
-    export_csv_rows(reports_dir / "relation-summary.csv", ["relation", "count"], relation_rows)
+    export_csv_rows(csv_dir / "relation-summary.csv", ["relation", "count"], relation_rows)
 
     kind_rows = (
         {"kind": kind, "count": count}
         for kind, count in sorted(traversal.kind_counts.items(), key=lambda item: (-item[1], item[0]))
     )
-    export_csv_rows(reports_dir / "object-summary.csv", ["kind", "count"], kind_rows)
+    export_csv_rows(csv_dir / "object-summary.csv", ["kind", "count"], kind_rows)
 
 
 def write_pack_readme(graph: Graph, output_dir: Path, pack_type: str) -> None:
@@ -233,25 +245,26 @@ This folder is a self-contained analysis pack for `{graph.source_system}`.
 ## Start here
 
 1. `report.md` - human-readable summary.
-2. `graph.json` - full machine-readable source-of-truth graph.
-3. `canonical-graph.json` - deterministic diff-friendly graph projection.
-4. `containers.json` - workflow/box group view with contained tasks/jobs.
-5. `containers.csv` - tabular workflow/box group membership for Excel/diff checks.
-6. `metrics.json` - graph metrics.
-7. `indexes/node-index.json` - lookup by id, name, kind, canonical key.
-8. `indexes/adjacency.json` - outgoing dependency index.
-9. `indexes/reverse-adjacency.json` - incoming dependency index.
-10. `graph.html` - offline interactive source graph report powered by bundled Cytoscape.js.
-11. `graph-data.js` - deterministic data payload used by `graph.html`.
-12. `cytoscape.min.js` - local Cytoscape.js runtime used by the HTML graph.
-13. `cytoscape.LICENSE` - Cytoscape.js MIT license.
-14. `graphs/README.md` - notes that Mermaid graph views have been decommissioned.
-15. `reports/top-connected.md` - most connected objects.
-16. `reports/orphans.md` - isolated objects.
+2. `json/pack-manifest.json` - machine-readable pack manifest.
+3. `json/graph.json` - full machine-readable source-of-truth graph.
+4. `json/canonical-graph.json` - deterministic diff-friendly graph projection.
+5. `json/containers.json` - workflow/box group view with contained tasks/jobs.
+6. `csv/containers.csv` - tabular workflow/box group membership for Excel/diff checks.
+7. `json/metrics.json` - graph metrics.
+8. `indexes/node-index.json` - lookup by id, name, kind, canonical key.
+9. `indexes/adjacency.json` - outgoing dependency index.
+10. `indexes/reverse-adjacency.json` - incoming dependency index.
+11. `ids/{reconciliation_keys_filename(graph.source_system)}` - diff-ready reconciliation ids.
+12. `graph.html` - offline interactive source graph report.
+13. `graph-data.js` - deterministic data payload used by `graph.html`.
+14. `cytoscape.min.js` - local runtime used by the HTML graph.
+15. `reports/top-connected.md` - obsolete nested report, kept temporarily.
+16. `reports/orphans.md` - obsolete nested report, kept temporarily.
+17. `csv/object-summary.csv` and `csv/relation-summary.csv` - tabular summaries.
 
 ## Important note
 
-`graph.json` is the source of truth. `canonical-graph.json` is sorted and stable for diff tools. `containers.json` is the container/group projection used to review workflow/box membership. `graph.html` is the offline interactive Cytoscape HTML graph report generated from `graph-data.js` and the bundled `cytoscape.min.js` runtime. Indexes and graph views are generated from the graph and can be regenerated.
+`json/graph.json` is the source of truth. `json/canonical-graph.json` is sorted and stable for diff tools. `json/containers.json` is the container/group projection used to review workflow/box membership. `graph.html` is the offline interactive graph report generated from `graph-data.js` and the bundled `cytoscape.min.js` runtime. Indexes are generated from the graph and can be regenerated. The `reports/` folder is obsolete and kept only for transition.
 """
     write_text_file(output_dir / "README.md", text)
 
@@ -264,12 +277,12 @@ def compare_analysis_packs(
     config: AnalyzerConfig,
     mapping_path: Path | None = None,
 ) -> None:
-    sb_graph_path = stonebranch_pack / "graph.json"
-    jil_graph_path = jil_pack / "graph.json"
+    sb_graph_path = _pack_graph_path(stonebranch_pack)
+    jil_graph_path = _pack_graph_path(jil_pack)
     if not sb_graph_path.exists():
-        raise FileNotFoundError(f"Stonebranch pack graph.json not found: {sb_graph_path}")
+        raise FileNotFoundError(f"Stonebranch pack json/graph.json not found: {sb_graph_path}")
     if not jil_graph_path.exists():
-        raise FileNotFoundError(f"JIL pack graph.json not found: {jil_graph_path}")
+        raise FileNotFoundError(f"JIL pack json/graph.json not found: {jil_graph_path}")
 
     sb_graph = load_graph_json(sb_graph_path)
     jil_graph = load_graph_json(jil_graph_path)
@@ -285,6 +298,13 @@ def compare_analysis_packs(
     write_compare_pack_manifest(output_dir, stonebranch_pack, jil_pack, comparison.summary)
 
 
+def _pack_graph_path(pack_dir: Path) -> Path:
+    current = pack_dir / "json" / "graph.json"
+    if current.exists():
+        return current
+    return pack_dir / "graph.json"
+
+
 def write_compare_pack_manifest(output_dir: Path, stonebranch_pack: Path, jil_pack: Path, summary: dict[str, Any]) -> None:
     manifest = {
         "pack_schema_version": "1.0",
@@ -294,25 +314,26 @@ def write_compare_pack_manifest(output_dir: Path, stonebranch_pack: Path, jil_pa
         "jil_pack": str(jil_pack),
         "summary": summary,
         "important_files": [
+            "json/compare-pack-manifest.json",
             "compare/report.md",
-            "compare/comparison.json",
-            "compare/metrics.json",
-            "compare/metrics.csv",
-            "compare/edge-diff.csv",
-            "compare/command-diff.csv",
+            "compare/json/comparison.json",
+            "compare/json/metrics.json",
+            "compare/csv/metrics.csv",
+            "compare/csv/edge-diff.csv",
+            "compare/csv/command-diff.csv",
             "compare/compare-graph.html",
             "compare/compare-graph-data.js",
             "compare/cytoscape.min.js",
-            "compare/cytoscape.LICENSE",
-            "compare/missing-in-stonebranch.csv",
-            "compare/missing-in-jil.csv",
-            "compare/collisions.csv",
-            "compare/mapping-diagnostics.csv",
-            "compare/diff-index.json",
-            "compare/critical-diff.json",
-            "compare/remediation-summary.json",
+            "compare/json/compare-graph-data.json",
+            "compare/csv/missing-in-stonebranch.csv",
+            "compare/csv/missing-in-jil.csv",
+            "compare/csv/collisions.csv",
+            "compare/csv/mapping-diagnostics.csv",
+            "compare/json/diff-index.json",
+            "compare/json/critical-diff.json",
+            "compare/json/remediation-summary.json",
             "compare/remediation-plan.md",
-            "compare/reconciliation.json",
+            "compare/json/reconciliation.json",
         ],
     }
-    write_json(output_dir / "compare-pack-manifest.json", manifest)
+    write_json(output_dir / "json" / "compare-pack-manifest.json", manifest)
