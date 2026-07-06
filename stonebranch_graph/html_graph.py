@@ -87,16 +87,19 @@ def export_graph_data_json(payload: dict[str, Any], path: Path) -> None:
     )
     write_text_file(path, text + "\n")
 
-# The lightweight Cytoscape viewer only ever renders three kinds of things:
-# groups (workflow/box containers), jobs (task/file_watcher schedulable
-# units), and the dependency edges between jobs. Everything else a Graph can
-# hold (agents, calendars, credentials, connections, email templates, files,
-# objects, scripts, triggers, variables, and non-dependency relations such as
-# uses_calendar/runs_on/runs_command/...) is intentionally excluded from the
-# graph-data.js payload for graph.html and compare-graph.html - not merely
-# hidden behind a UI filter. Skeleton payloads (build_skeleton_graph_data)
-# already only ever contain container/unit nodes and trigger-derived
-# dependency edges, so they need no equivalent filtering here.
+# The lightweight Cytoscape canvas only ever renders three kinds of visual
+# elements: groups (workflow/box containers), jobs (task/file_watcher
+# schedulable units), and the dependency edges between jobs. Everything else
+# a Graph can hold (agents, calendars, credentials, connections, email
+# templates, files, objects, scripts, triggers, variables) is excluded from
+# the drawn graph, but is still emitted as a separate, non-visual `objects`
+# list (see below) purely so the offline HTML search box can find it and show
+# which jobs reference it - it never becomes a Cytoscape node/edge, and
+# non-dependency relations (uses_calendar/runs_on/runs_command/...) are only
+# used to compute that job<->object linkage, never turned into drawn edges.
+# Skeleton payloads (build_skeleton_graph_data) already only ever contain
+# container/unit nodes and trigger-derived dependency edges, so they need no
+# equivalent object list.
 CONTAINER_KINDS = {KIND_WORKFLOW, KIND_BOX}
 JOB_NODE_KINDS = {KIND_TASK, KIND_FILE_WATCHER}
 
@@ -158,8 +161,11 @@ def build_cytoscape_graph_data(
     offline HTML graph report showing only groups (workflow/box containers),
     jobs (task/file_watcher units), and the dependency edges between jobs.
     Every other node kind (agents, calendars, credentials, connections, email
-    templates, files, objects, scripts, triggers, variables) and every
-    non-dependency relation is left out of this payload entirely.
+    templates, files, objects, scripts, triggers, variables) is left out of
+    the drawn graph but still included as a separate `objects` list (with a
+    `used_by` back-reference to whichever jobs reference it via any
+    non-dependency relation), purely so the HTML report's search box can find
+    it - see the CONTAINER_KINDS/JOB_NODE_KINDS comment above for details.
     """
 
     traversal = traversal or GraphTraversalCache.build(graph)
@@ -220,41 +226,82 @@ def build_cytoscape_graph_data(
             }
         )
 
+    # Everything that is neither a container (group) nor a job-like unit -
+    # agents, calendars, credentials, connections, email templates, files,
+    # objects, scripts, triggers, variables - is surfaced here as a
+    # lightweight, non-visual "object" record so the offline HTML search box
+    # can find it even though it is never drawn as a Cytoscape node/edge.
+    # `used_by` below is populated from whichever relation (uses_calendar,
+    # runs_on, uses_credential, watches_file, ...) actually connects a job to
+    # it, so the report doesn't need a second relation allowlist to stay in
+    # sync with DEPENDENCY_RELATIONS.
+    objects = []
+    object_keys: set[str] = set()
+    for node in traversal.sorted_nodes:
+        if node.kind in CONTAINER_KINDS or node.kind in JOB_NODE_KINDS:
+            continue
+        key = canonical_node_key(node)
+        object_keys.add(key)
+        objects.append(
+            {
+                "id": key,
+                "key": key,
+                "graph_id": node.id,
+                "name": node.name,
+                "label": _display_name(node),
+                "kind": node.kind,
+                "source_file": _html_path(node.source_file),
+            }
+        )
+
     edges = []
     depends_on: dict[str, list[str]] = defaultdict(list)
+    object_refs: dict[str, set[str]] = defaultdict(set)
+    used_by: dict[str, set[str]] = defaultdict(set)
     for edge in traversal.sorted_edges:
         components = canonical_edge_components(edge, graph)
         if components is None:
             continue
         source, relation, target = components
-        if relation not in DEPENDENCY_RELATIONS:
-            continue
         source_key = canonical_node_key(source)
         target_key = canonical_node_key(target)
-        if source_key not in job_keys or target_key not in job_keys:
+
+        if relation in DEPENDENCY_RELATIONS and source_key in job_keys and target_key in job_keys:
+            payload = {
+                "id": f"{source_key}|{relation}|{target_key}|{edge.id}",
+                "source": source_key,
+                "target": target_key,
+                "relation": relation,
+                "category": "dependencies",
+                "native_relation": edge.native_relation,
+                "confidence": edge.confidence,
+                "evidence_file": _html_path(edge.evidence_file),
+                "evidence_path": edge.evidence_path,
+                "evidence_key": edge.evidence_key,
+                "evidence_value": edge.evidence_value,
+                "graph_edge_id": edge.id,
+            }
+            edges.append(payload)
+            depends_on[source_key].append(target_key)
             continue
-        payload = {
-            "id": f"{source_key}|{relation}|{target_key}|{edge.id}",
-            "source": source_key,
-            "target": target_key,
-            "relation": relation,
-            "category": "dependencies",
-            "native_relation": edge.native_relation,
-            "confidence": edge.confidence,
-            "evidence_file": _html_path(edge.evidence_file),
-            "evidence_path": edge.evidence_path,
-            "evidence_key": edge.evidence_key,
-            "evidence_value": edge.evidence_value,
-            "graph_edge_id": edge.id,
-        }
-        edges.append(payload)
-        depends_on[source_key].append(target_key)
+
+        if source_key in job_keys and target_key in object_keys:
+            object_refs[source_key].add(target_key)
+            used_by[target_key].add(source_key)
+        elif source_key in object_keys and target_key in job_keys:
+            object_refs[target_key].add(source_key)
+            used_by[source_key].add(target_key)
 
     for job in jobs:
         job["depends_on"] = sorted(set(depends_on.get(job["id"], [])))
+        job["object_refs"] = sorted(object_refs.get(job["id"], []))
+
+    for obj in objects:
+        obj["used_by"] = sorted(used_by.get(obj["id"], []))
 
     groups = sorted(groups, key=lambda item: (item["id"], item["kind"], item["name"]))
     jobs = sorted(jobs, key=lambda item: (item["group"] or "", item["id"], item["kind"], item["name"]))
+    objects = sorted(objects, key=lambda item: (item["kind"], item["id"], item["name"]))
     edges = sorted(
         edges,
         key=lambda item: (
@@ -279,11 +326,13 @@ def build_cytoscape_graph_data(
             "edges": len(graph.edges),
             "groups": len(groups),
             "jobs": len(jobs),
+            "objects": len(objects),
             "warnings": len(graph.warnings),
             "relation_categories": dict(sorted(category_counts.items())),
         },
         "groups": groups,
         "jobs": jobs,
+        "objects": objects,
         "edges": edges,
         "warnings": sorted(str(warning) for warning in graph.warnings),
     }
@@ -1146,7 +1195,7 @@ CYTOSCAPE_HTML = r'''<!doctype html>
     <span class="crumb" id="crumb">all boxes collapsed</span>
     <div class="sep"></div>
     <div class="search-wrap">
-      <input id="search" type="text" placeholder="Search task/job/workflow... (/)" autocomplete="off" />
+      <input id="search" type="text" placeholder="Search task/job/workflow/object... (/)" autocomplete="off" />
       <span id="searchCount"></span>
     </div>
     <select id="statusFilter" title="Status filter">
@@ -1180,6 +1229,7 @@ CYTOSCAPE_HTML = r'''<!doctype html>
       <span><b id="nJobs">0</b> jobs</span>
       <span><b id="nBoxes">0</b> boxes</span>
       <span><b id="nEdges">0</b> deps</span>
+      <span><b id="nObjects">0</b> objects</span>
       <span id="health"></span>
     </div>
   </header>
@@ -1233,7 +1283,12 @@ if(hasStrictnessLevels) $('levelFilter').value = activeStrictnessLevel;
 
 const groupById = Object.fromEntries((DATA.groups || []).map(g => [g.id, g]));
 const jobById = Object.fromEntries((DATA.jobs || []).map(j => [j.id, j]));
-const nodeById = {...groupById, ...jobById};
+// Objects (agents, calendars, credentials, connections, email templates,
+// files, objects, scripts, triggers, variables) never appear on the
+// Cytoscape canvas - they only exist so search/the side panel can surface
+// them and show which jobs reference them.
+const objectById = Object.fromEntries((DATA.objects || []).map(o => [o.id, o]));
+const nodeById = {...groupById, ...jobById, ...objectById};
 const edgeById = Object.fromEntries((DATA.edges || []).map(e => [e.id, e]));
 const outEdges = {}, inEdges = {};
 for(const e of DATA.edges || []){
@@ -1901,6 +1956,7 @@ function updateStats(){
   $('nJobs').textContent = (DATA.jobs || []).length;
   $('nBoxes').textContent = (DATA.groups || []).length;
   $('nEdges').textContent = (DATA.edges || []).length;
+  $('nObjects').textContent = (DATA.objects || []).length;
   const health = $('health');
   if(hasComparisonStatuses){
     const statuses = DATA.metadata?.statuses || {};
@@ -1931,6 +1987,11 @@ function depRow(id){
 function boxRow(gid){
   const g = groupById[gid]; if(!g) return '';
   return `<div class="dep-item" data-box="${escapeHtml(gid)}"><span class="box-dot" style="background:${colorFor(gid)}"></span><span class="nm">${escapeHtml(label(g))}</span></div>`;
+}
+function objectRow(entry){
+  const oid = typeof entry === 'string' ? entry : entry.id;
+  const o = objectById[oid]; if(!o) return '';
+  return `<div class="dep-item" data-object="${escapeHtml(oid)}"><span class="box-dot" style="background:#868e96"></span><span class="nm" title="${escapeHtml(oid)}">${escapeHtml(label(o))} <span style="color:var(--muted)">(${escapeHtml(o.kind || 'object')})</span></span></div>`;
 }
 function showOverview(){
   pTitle().textContent = 'Overview';
@@ -2003,6 +2064,38 @@ function showJobPanel(id){
   pBody().innerHTML = html;
   bindPanelActions();
 }
+function showObjectPanel(id){
+  const o = objectById[id]; if(!o) return;
+  const usedBy = (o.used_by || []).slice().sort();
+  pTitle().textContent = label(o);
+  pSub().textContent = `${o.kind || 'object'}${o.source_file ? ' · ' + o.source_file : ''}`;
+  let html = kv('Kind', o.kind || '') + kv('Source file', o.source_file || '—');
+  html += `<div class="sec-title">Used by <span class="count-pill">${usedBy.length}</span></div>`;
+  html += renderDepList(usedBy, 'No jobs reference this object');
+  pBody().innerHTML = html;
+  bindPanelActions();
+}
+// Shown for a search that matches several things at once (multiple jobs
+// and/or objects) - individual single matches still get their own focused
+// panel (showJobPanel / showObjectPanel) via runSearch.
+function showSearchResultsPanel(jobMatches, objectMatches){
+  pTitle().textContent = 'Search results';
+  pSub().textContent = `${jobMatches.length} job(s) · ${objectMatches.length} object(s)`;
+  let html = '';
+  if(jobMatches.length){
+    html += `<div class="sec-title">Jobs <span class="count-pill">${jobMatches.length}</span></div>`;
+    html += renderDepList(jobMatches.map(j => j.id), 'No matching jobs');
+  }
+  if(objectMatches.length){
+    html += `<div class="sec-title">Objects <span class="count-pill">${objectMatches.length}</span></div>`;
+    const shown = objectMatches.slice(0, DEP_LIST_RENDER_CAP);
+    html += shown.map(objectRow).join('');
+    const hidden = objectMatches.length - shown.length;
+    if(hidden > 0) html += `<div class="chain-note">+${hidden} more not shown (refine search)</div>`;
+  }
+  pBody().innerHTML = html || '<div class="empty">No matches</div>';
+  bindPanelActions();
+}
 function edgeCard(e, selfId){
   const other = e.source === selfId ? e.target : e.source;
   const evidence = [e.relation, e.confidence, e.evidence_file, e.evidence_key, e.evidence_path].filter(Boolean).join(' | ');
@@ -2030,10 +2123,11 @@ function showEdgePanel(edgeVisualId){
 function bindPanelActions(){
   pBody().querySelectorAll('[data-job]').forEach(el => el.addEventListener('click', ev => { ev.stopPropagation(); focusJob(el.getAttribute('data-job')); }));
   pBody().querySelectorAll('[data-box]').forEach(el => el.addEventListener('click', ev => { ev.stopPropagation(); expandBoxPath(el.getAttribute('data-box')); }));
+  pBody().querySelectorAll('[data-object]').forEach(el => el.addEventListener('click', ev => { ev.stopPropagation(); showObjectPanel(el.getAttribute('data-object')); }));
   pBody().querySelectorAll('[data-any]').forEach(el => el.addEventListener('click', ev => {
     ev.stopPropagation();
     const id = el.getAttribute('data-any');
-    if(jobById[id]) focusJob(id); else if(groupById[id]) expandBoxPath(id);
+    if(jobById[id]) focusJob(id); else if(groupById[id]) expandBoxPath(id); else if(objectById[id]) showObjectPanel(id);
   }));
   pBody().querySelectorAll('[data-copy]').forEach(el => el.addEventListener('click', ev => {
     ev.stopPropagation(); copyText(el.getAttribute('data-copy'));
@@ -2060,19 +2154,34 @@ function runSearch(){
     showOverview();
     return;
   }
-  const matches = (DATA.jobs || []).filter(j => label(j).toLowerCase().includes(q) || j.id.toLowerCase().includes(q));
-  const toExpand = matches.length > SEARCH_EXPAND_CAP ? matches.slice(0, SEARCH_EXPAND_CAP) : matches;
-  searchCount.textContent = matches.length > toExpand.length
-    ? `${matches.length} (showing first ${toExpand.length}, refine search)`
-    : String(matches.length);
+  const jobMatches = (DATA.jobs || []).filter(j => label(j).toLowerCase().includes(q) || j.id.toLowerCase().includes(q));
+  // Objects (agents, calendars, credentials, connections, email templates,
+  // files, objects, scripts, triggers, variables) are never drawn on the
+  // canvas, so they can't be expanded/fitted like a job match - they only
+  // ever show up in the count and the side panel below.
+  const objectMatches = (DATA.objects || []).filter(o =>
+    label(o).toLowerCase().includes(q) || o.id.toLowerCase().includes(q) || (o.kind || '').toLowerCase().includes(q)
+  );
+  const toExpand = jobMatches.length > SEARCH_EXPAND_CAP ? jobMatches.slice(0, SEARCH_EXPAND_CAP) : jobMatches;
+  const totalMatches = jobMatches.length + objectMatches.length;
+  const totalShown = toExpand.length + objectMatches.length;
+  searchCount.textContent = totalMatches > totalShown
+    ? `${totalMatches} (showing first ${totalShown}, refine search)`
+    : String(totalMatches);
   const paths = new Set();
   for(const m of toExpand) for(const g of ancestorChain(m.id)) paths.add(g);
   expandedGroups = paths;
   buildCy({ skipFit: true });
   clearHighlightClasses();
   toExpand.forEach(m => { const ele = cy.getElementById(m.id); if(ele.length) ele.addClass('match'); });
-  fitToVisible(toExpand.map(m => m.id), 80);
-  if(matches.length === 1) showJobPanel(matches[0].id);
+  if(toExpand.length) fitToVisible(toExpand.map(m => m.id), 80);
+  if(jobMatches.length === 1 && objectMatches.length === 0){
+    showJobPanel(jobMatches[0].id);
+  } else if(jobMatches.length === 0 && objectMatches.length === 1){
+    showObjectPanel(objectMatches[0].id);
+  } else if(jobMatches.length || objectMatches.length){
+    showSearchResultsPanel(jobMatches, objectMatches);
+  }
 }
 let searchTimer;
 searchInput.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 200); });
