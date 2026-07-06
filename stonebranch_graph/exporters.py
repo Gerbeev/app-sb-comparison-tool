@@ -3,18 +3,35 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any
 
-from .core import Edge, Graph, Node
+from .config import AnalyzerConfig
+from .core import (
+    Edge,
+    Graph,
+    Node,
+    comparison_kind,
+    comparison_name,
+    normalize_name,
+    strip_migration_suffixes,
+)
 from .graph_utils import GraphTraversalCache
 from .domain import (
+    ARTIFACT_NODE_KINDS,
+    INFRASTRUCTURE_KINDS,
+    JOB_LIKE_KINDS,
     KIND_BOX,
+    KIND_OBJECT,
     KIND_TASK,
     KIND_WORKFLOW,
     REL_CONTAINS,
     REL_DEPENDS_ON_SUCCESS,
     REL_SUCCESSOR_OF,
+    SOURCE_AUTOSYS_JIL,
+    SOURCE_AUTOSYS_JIL_ALIAS,
+    SOURCE_STONEBRANCH,
+    SYSTEM_SPECIFIC_KINDS,
 )
 from .metrics import GraphMetrics, compute_graph_metrics, metric_rows, metrics_to_dict
 from .rendering import escape_dot
@@ -69,6 +86,7 @@ def export_graph_bundle(
     *,
     max_graph_edges: int | None = TOP_LEVEL_GRAPH_MAX_EDGES,
     traversal: GraphTraversalCache | None = None,
+    config: AnalyzerConfig | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     traversal = traversal or GraphTraversalCache.build(graph)
@@ -82,6 +100,13 @@ def export_graph_bundle(
     export_nodes_csv(graph, output_dir / "objects.csv", traversal=traversal)
     export_edges_csv(graph, output_dir / "edges.csv", traversal=traversal)
     export_dot(graph, output_dir / "dependency-graph.dot", max_edges=max_graph_edges, traversal=traversal)
+    suffix_patterns = (config or AnalyzerConfig.default()).suffix_strips
+    export_reconciliation_keys(
+        graph,
+        output_dir / reconciliation_keys_filename(graph.source_system),
+        patterns=suffix_patterns,
+        traversal=traversal,
+    )
     metrics_payload = metrics_to_dict(graph_metrics)
     write_json(output_dir / "metrics.json", metrics_payload)
     export_csv_rows(output_dir / "metrics.csv", METRICS_CSV_FIELDS, metric_rows(metrics_payload))
@@ -113,6 +138,108 @@ def write_canonical_json(path: Path, payload: Any) -> None:
     """Write JSON in a deterministic form intended for diff tools."""
 
     write_text_file(path, json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+# --- Reconciliation key-list export (autosys.keys.json / stonebranch.keys.json) ----
+#
+# A lightweight, per-system, diff-tool-friendly export of "which objects exist"
+# emitted alongside every graph build. Deliberately independent of any
+# cross-system mapping.json: it only applies the built-in migration-noise
+# suffix stripping and kind collapsing, so two systems built without any
+# mapping file still produce byte-identical lines for the same logical object.
+
+RECONCILIATION_KEYS_FILENAME_BY_SOURCE = {
+    SOURCE_STONEBRANCH: "stonebranch",
+    SOURCE_AUTOSYS_JIL: "autosys",
+    SOURCE_AUTOSYS_JIL_ALIAS: "autosys",
+}
+
+
+def reconciliation_keys_filename(source_system: str) -> str:
+    prefix = RECONCILIATION_KEYS_FILENAME_BY_SOURCE.get(source_system, source_system)
+    return f"{prefix}.keys.json"
+
+
+def _in_reconciliation_scope(node: Node) -> bool:
+    """Return whether `node` should appear in the reconciliation key list.
+
+    Mirrors `compare.node_comparison_category`'s scoping rules (job-like
+    definitions plus infrastructure, excluding artifact/system-specific kinds
+    and reference-only synthetic placeholders) as a small boolean predicate.
+    Duplicated here (rather than imported) because `compare.py` imports this
+    module already; keep the two in sync if comparison scoping rules change.
+    """
+    if node.kind in ARTIFACT_NODE_KINDS or node.metadata.get("artifact"):
+        return False
+    if node.kind in SYSTEM_SPECIFIC_KINDS:
+        return False
+    synthetic = bool(node.metadata.get("synthetic"))
+    if node.kind in JOB_LIKE_KINDS:
+        return not synthetic
+    if node.kind in INFRASTRUCTURE_KINDS:
+        return True
+    if node.kind == KIND_OBJECT and synthetic:
+        return False
+    return not synthetic
+
+
+def reconciliation_id(node: Node, patterns: Sequence[str] | None = None) -> str:
+    """Return the diff-friendly reconciliation ID for a single node.
+
+    `env` is only included when the graph actually mixes more than one env
+    label (see `build_reconciliation_ids`); this function always includes it
+    and the caller strips the prefix for the common single-env case, keeping
+    this function pure/stateless and testable in isolation.
+    """
+    kind = comparison_kind(node.kind)
+    name = normalize_name(strip_migration_suffixes(comparison_name(node.name), patterns))
+    return f"{node.env}:{kind}:{name}"
+
+
+def build_reconciliation_ids(
+    graph: Graph,
+    patterns: Sequence[str] | None = None,
+    *,
+    traversal: GraphTraversalCache | None = None,
+) -> list[str]:
+    """Project in-scope graph nodes to sorted, deduped reconciliation IDs.
+
+    In scope: job-like objects (tasks/boxes/workflows/file watchers) plus
+    infrastructure (agents, calendars, variables, files); excluded: artifact
+    nodes (command-hash helpers), Stonebranch-only system-specific kinds
+    (triggers/credentials/connections/scripts/email templates), and
+    reference-only synthetic placeholders with no real definition.
+
+    `env` is dropped from the id (`kind:name` instead of `env:kind:name`)
+    unless the graph mixes more than one env label, so the common single-env
+    export doesn't diff on a redundant label.
+    """
+    traversal = traversal or GraphTraversalCache.build(graph)
+    in_scope = [node for node in traversal.sorted_nodes if _in_reconciliation_scope(node)]
+    envs = {node.env for node in in_scope}
+    include_env = len(envs) > 1
+    ids = set()
+    for node in in_scope:
+        full_id = reconciliation_id(node, patterns)
+        ids.add(full_id if include_env else full_id.split(":", 1)[1])
+    return sorted(ids)
+
+
+def export_reconciliation_keys(
+    graph: Graph,
+    path: Path,
+    *,
+    patterns: Sequence[str] | None = None,
+    traversal: GraphTraversalCache | None = None,
+) -> None:
+    """Write the flat, sorted JSON array of reconciliation ID strings.
+
+    The primary reconciliation artifact: one array of plain strings, nothing
+    else (no kind wrapper objects, no metadata, no source_file, no hashes),
+    so the same logical object on both systems produces a byte-identical
+    line for a plain text/Notepad++ diff.
+    """
+    write_canonical_json(path, build_reconciliation_ids(graph, patterns, traversal=traversal))
 
 
 def canonical_kind(kind: str) -> str:

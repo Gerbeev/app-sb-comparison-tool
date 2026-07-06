@@ -9,7 +9,13 @@ from .alias import AliasTable
 from .compare import Comparison, compare_graphs, export_comparison
 from .config import AnalyzerConfig, MappingConfig
 from .core import Graph
-from .exporters import export_csv_rows, export_graph_bundle, load_graph_json, write_text_file
+from .exporters import (
+    export_csv_rows,
+    export_graph_bundle,
+    load_graph_json,
+    reconciliation_keys_filename,
+    write_text_file,
+)
 from .html_graph import export_skeleton_comparison_html, export_skeleton_html_report
 from .logging_utils import log_comparison_risks, log_exception, log_graph_warnings, log_info
 from .pack import compare_analysis_packs, create_analysis_pack
@@ -72,8 +78,8 @@ class ProfileWorkflowResult:
     files: list[Path]
 
 
-def graph_bundle_files(output_dir: Path) -> list[Path]:
-    return [
+def graph_bundle_files(output_dir: Path, source_system: str | None = None) -> list[Path]:
+    files = [
         output_dir / "report.md",
         output_dir / "graph.json",
         output_dir / "canonical-graph.json",
@@ -89,6 +95,9 @@ def graph_bundle_files(output_dir: Path) -> list[Path]:
         output_dir / "edges.csv",
         output_dir / "dependency-graph.dot",
     ]
+    if source_system:
+        files.append(output_dir / reconciliation_keys_filename(source_system))
+    return files
 
 
 def skeleton_bundle_files(output_dir: Path) -> list[Path]:
@@ -104,8 +113,8 @@ def skeleton_bundle_files(output_dir: Path) -> list[Path]:
     ]
 
 
-def analysis_pack_files(output_dir: Path) -> list[Path]:
-    return [
+def analysis_pack_files(output_dir: Path, source_system: str | None = None) -> list[Path]:
+    files = [
         output_dir / "README.md",
         output_dir / "pack-manifest.json",
         output_dir / "report.md",
@@ -123,6 +132,9 @@ def analysis_pack_files(output_dir: Path) -> list[Path]:
         output_dir / "graphs" / "README.md",
         output_dir / "reports" / "top-connected.md",
     ]
+    if source_system:
+        files.append(output_dir / reconciliation_keys_filename(source_system))
+    return files
 
 
 def comparison_files(output_dir: Path) -> list[Path]:
@@ -147,6 +159,7 @@ def comparison_files(output_dir: Path) -> list[Path]:
         compare_dir / "critical-diff.json",
         compare_dir / "remediation-summary.json",
         compare_dir / "remediation-plan.md",
+        compare_dir / "reconciliation.json",
     ]
 
 
@@ -236,14 +249,14 @@ def build_stonebranch_graph(
             env_aware=env_aware,
             deep_scan=deep_scan,
         ).parse(input_path)
-        export_graph_bundle(graph, output_dir)
+        export_graph_bundle(graph, output_dir, config=runtime_config)
         log_graph_warnings(output_dir, graph.warnings, source="stonebranch")
         log_info(output_dir, f"Completed Stonebranch graph build: nodes={len(graph.nodes)} edges={len(graph.edges)}")
         return GraphWorkflowResult(
             graph=graph,
             output_dir=output_dir,
             summary=graph_summary(graph),
-            files=graph_bundle_files(output_dir),
+            files=graph_bundle_files(output_dir, source_system=graph.source_system),
         )
     except Exception as exc:
         log_exception(output_dir, "Stonebranch graph build", exc)
@@ -262,14 +275,14 @@ def build_jil_graph(
     try:
         runtime_config = config.with_runtime_flags(include_raw_values=include_raw_values)
         graph = AutosysJilParser(runtime_config, env=env).parse(input_path)
-        export_graph_bundle(graph, output_dir)
+        export_graph_bundle(graph, output_dir, config=runtime_config)
         log_graph_warnings(output_dir, graph.warnings, source="jil")
         log_info(output_dir, f"Completed JIL graph build: nodes={len(graph.nodes)} edges={len(graph.edges)}")
         return GraphWorkflowResult(
             graph=graph,
             output_dir=output_dir,
             summary=graph_summary(graph),
-            files=graph_bundle_files(output_dir),
+            files=graph_bundle_files(output_dir, source_system=graph.source_system),
         )
     except Exception as exc:
         log_exception(output_dir, "JIL graph build", exc)
@@ -369,6 +382,7 @@ def build_stonebranch_pack(
             include_raw_values=include_raw_values,
             deep_scan=deep_scan,
             env_aware=env_aware,
+            config=runtime_config,
         )
         log_graph_warnings(output_dir, graph.warnings, source="stonebranch")
         log_info(output_dir, f"Completed Stonebranch analysis pack build: nodes={len(graph.nodes)} edges={len(graph.edges)}")
@@ -376,7 +390,7 @@ def build_stonebranch_pack(
             graph=graph,
             output_dir=output_dir,
             summary=graph_summary(graph),
-            files=analysis_pack_files(output_dir),
+            files=analysis_pack_files(output_dir, source_system=graph.source_system),
         )
     except Exception as exc:
         log_exception(output_dir, "Stonebranch analysis pack build", exc)
@@ -402,6 +416,7 @@ def build_jil_pack(
             source_path=input_path,
             env=env,
             include_raw_values=include_raw_values,
+            config=runtime_config,
         )
         log_graph_warnings(output_dir, graph.warnings, source="jil")
         log_info(output_dir, f"Completed JIL analysis pack build: nodes={len(graph.nodes)} edges={len(graph.edges)}")
@@ -409,7 +424,7 @@ def build_jil_pack(
             graph=graph,
             output_dir=output_dir,
             summary=graph_summary(graph),
-            files=analysis_pack_files(output_dir),
+            files=analysis_pack_files(output_dir, source_system=graph.source_system),
         )
     except Exception as exc:
         log_exception(output_dir, "JIL analysis pack build", exc)
@@ -434,8 +449,8 @@ def compare_direct(
         mapping = MappingConfig.from_file(mapping_path, runtime_config)
         sb_graph = StonebranchJsonParser(runtime_config, env=env, env_aware=env_aware, deep_scan=deep_scan).parse(stonebranch_path)
         jil_graph = AutosysJilParser(runtime_config, env=env).parse(jil_path)
-        export_graph_bundle(sb_graph, output_dir / "stonebranch")
-        export_graph_bundle(jil_graph, output_dir / "jil")
+        export_graph_bundle(sb_graph, output_dir / "stonebranch", config=runtime_config)
+        export_graph_bundle(jil_graph, output_dir / "jil", config=runtime_config)
         comparison = compare_graphs(sb_graph, jil_graph, mapping, runtime_config)
         export_comparison(comparison, output_dir, sb_graph, jil_graph)
         log_graph_warnings(output_dir, sb_graph.warnings, source="stonebranch")

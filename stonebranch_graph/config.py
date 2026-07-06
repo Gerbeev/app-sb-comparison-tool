@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .core import DEFAULT_SUFFIX_STRIP_PATTERNS
 from .domain import (
     KIND_AGENT,
     KIND_AGENT_CLUSTER,
@@ -199,6 +200,7 @@ class AnalyzerConfig:
     kind_aliases: dict[str, str] | None = None
     max_evidence_value_len: int = 180
     include_raw_values: bool = False
+    suffix_strips: tuple[str, ...] = DEFAULT_SUFFIX_STRIP_PATTERNS
 
     @staticmethod
     def default() -> AnalyzerConfig:
@@ -206,6 +208,7 @@ class AnalyzerConfig:
             folder_kind_map=STONEBRANCH_FOLDER_KIND_MAP,
             relation_aliases=RELATION_ALIASES,
             kind_aliases=KIND_ALIASES,
+            suffix_strips=DEFAULT_SUFFIX_STRIP_PATTERNS,
         )
 
     @staticmethod
@@ -227,6 +230,7 @@ class AnalyzerConfig:
             kind_aliases=data.get("kind_aliases", base.kind_aliases),
             max_evidence_value_len=int(data.get("max_evidence_value_len", base.max_evidence_value_len)),
             include_raw_values=bool(data.get("include_raw_values", base.include_raw_values)),
+            suffix_strips=tuple(data.get("suffix_strips", list(base.suffix_strips))),
         )
 
 
@@ -242,6 +246,7 @@ class AnalyzerConfig:
             kind_aliases=self.kind_aliases,
             max_evidence_value_len=self.max_evidence_value_len,
             include_raw_values=self.include_raw_values if include_raw_values is None else include_raw_values,
+            suffix_strips=self.suffix_strips,
         )
 
 
@@ -250,6 +255,7 @@ class MappingConfig:
     node_mappings: dict[str, str]
     name_rewrites: list[dict[str, str]]
     kind_aliases: dict[str, str]
+    suffix_strips: tuple[str, ...] = DEFAULT_SUFFIX_STRIP_PATTERNS
 
     @staticmethod
     def empty(config: AnalyzerConfig) -> MappingConfig:
@@ -257,6 +263,7 @@ class MappingConfig:
             node_mappings={},
             name_rewrites=[],
             kind_aliases=config.kind_aliases or {},
+            suffix_strips=config.suffix_strips,
         )
 
     @staticmethod
@@ -280,4 +287,5 @@ class MappingConfig:
             node_mappings=mappings,
             name_rewrites=list(data.get("name_rewrites", data.get("name_rules", []))),
             kind_aliases=data.get("kind_aliases", config.kind_aliases or {}),
+            suffix_strips=tuple(data.get("suffix_strips", list(config.suffix_strips))),
         )

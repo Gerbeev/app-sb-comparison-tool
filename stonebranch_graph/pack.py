@@ -8,7 +8,14 @@ from typing import Any
 from .compare import compare_graphs, export_comparison
 from .config import AnalyzerConfig, MappingConfig
 from .core import Graph
-from .exporters import export_csv_rows, export_graph_bundle, load_graph_json, write_json, write_text_file
+from .exporters import (
+    export_csv_rows,
+    export_graph_bundle,
+    load_graph_json,
+    reconciliation_keys_filename,
+    write_json,
+    write_text_file,
+)
 from .graph_utils import GraphTraversalCache
 from .logging_utils import log_comparison_risks, log_graph_warnings, log_info
 
@@ -23,11 +30,12 @@ def create_analysis_pack(
     include_raw_values: bool,
     deep_scan: bool = False,
     env_aware: bool = False,
+    config: AnalyzerConfig | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     traversal = GraphTraversalCache.build(graph)
 
-    export_graph_bundle(graph, output_dir, traversal=traversal)
+    export_graph_bundle(graph, output_dir, traversal=traversal, config=config)
     write_pack_manifest(
         graph=graph,
         output_dir=output_dir,
@@ -80,6 +88,7 @@ def write_pack_manifest(
             "report.md",
             "graph.json",
             "canonical-graph.json",
+            reconciliation_keys_filename(graph.source_system),
             "graph.html",
             "graph-data.js",
             "cytoscape.min.js",
@@ -303,6 +312,7 @@ def write_compare_pack_manifest(output_dir: Path, stonebranch_pack: Path, jil_pa
             "compare/critical-diff.json",
             "compare/remediation-summary.json",
             "compare/remediation-plan.md",
+            "compare/reconciliation.json",
         ],
     }
     write_json(output_dir / "compare-pack-manifest.json", manifest)

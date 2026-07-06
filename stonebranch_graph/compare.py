@@ -6,18 +6,23 @@ from pathlib import Path
 from typing import Any
 
 from .config import AnalyzerConfig, MappingConfig
-from .core import Edge, Graph, Node, comparison_name, enterprise_name_parts, normalize_name
+from .core import (
+    Edge,
+    Graph,
+    Node,
+    comparison_kind,
+    comparison_name,
+    enterprise_name_parts,
+    normalize_name,
+    strip_migration_suffixes,
+)
 from .domain import (
     ARTIFACT_EDGE_RELATIONS,
     ARTIFACT_NODE_KINDS,
     INFRASTRUCTURE_KINDS,
     JOB_LIKE_KINDS,
-    KIND_AGENT,
-    KIND_AGENT_CLUSTER,
     KIND_BOX,
-    KIND_FILE_WATCHER,
     KIND_OBJECT,
-    KIND_TASK,
     KIND_WORKFLOW,
     KNOWN_SOURCE_SYSTEMS,
     ONE_SIDED_EDGE_RELATIONS,
@@ -29,7 +34,7 @@ from .domain import (
     REL_SUCCESSOR_OF,
     SYSTEM_SPECIFIC_KINDS,
 )
-from .exporters import export_csv_rows, write_json
+from .exporters import export_csv_rows, write_canonical_json, write_json
 from .metrics import compute_comparison_metrics, metric_rows, metrics_to_dict
 
 
@@ -590,35 +595,13 @@ def normalize_key(key: str, mapping: MappingConfig, env_map: dict[str, str] | No
     if env_map:
         env = env_map.get(env, env)
     kind = comparison_kind(mapping.kind_aliases.get(kind, kind))
-    name = normalize_name(comparison_name(name))
+    name = normalize_name(strip_migration_suffixes(comparison_name(name), mapping.suffix_strips))
     for rule in mapping.name_rewrites:
         pattern = rule.get("from", "")
         repl = rule.get("to", "")
         if pattern:
             name = re.sub(pattern, repl, name)
     return f"{env}:{kind}:{name}"
-
-
-COMPARISON_KIND_MAP = {
-    # AutoSys boxes and Stonebranch workflows are the same containment concept.
-    KIND_WORKFLOW: KIND_BOX,
-    # AutoSys file-watcher jobs migrate to Stonebranch file-monitor tasks; both
-    # are schedulable job objects with the same identity.
-    KIND_FILE_WATCHER: KIND_TASK,
-    # AutoSys "machine" may map to a Stonebranch agent or an agent cluster;
-    # both represent the runtime execution target.
-    KIND_AGENT_CLUSTER: KIND_AGENT,
-}
-
-
-def comparison_kind(kind: str) -> str:
-    """Return kind used for cross-system comparison keys.
-
-    Kinds that represent the same migration concept in both schedulers are
-    collapsed for matching, while the original node kind stays untouched in
-    graph.json and reports.
-    """
-    return COMPARISON_KIND_MAP.get(kind, kind)
 
 
 COMPARISON_RELATION_MAP = {
@@ -851,8 +834,37 @@ def export_comparison(
     write_diff_index(compare_dir, comparison)
     write_critical_diff(compare_dir, comparison)
     write_remediation_plan(compare_dir, comparison)
+    export_reconciliation_report(comparison, compare_dir / "reconciliation.json")
     from .html_graph import export_comparison_html_report
     export_comparison_html_report(comparison, stonebranch, jil, output_dir)
+
+
+def export_reconciliation_report(comparison: Comparison, path: Path) -> None:
+    """Serialize the already-computed node reconciliation sets to a single file.
+
+    No new comparison math: `comparison.nodes` already holds the matched /
+    missing_in_stonebranch / missing_in_jil payloads (each carrying its
+    comparison key) computed by `compare_graphs`. This just re-shapes those
+    into three sorted key-string arrays so a migration reviewer gets a
+    straight "what's missing / extra after migration" answer without a diff
+    tool. Written with `write_canonical_json` for deterministic, diffable
+    output.
+    """
+    only_in_autosys = sorted(
+        item["comparison_key"] for item in comparison.nodes.get("missing_in_stonebranch", []) if item.get("comparison_key")
+    )
+    only_in_stonebranch = sorted(
+        item["comparison_key"] for item in comparison.nodes.get("missing_in_jil", []) if item.get("comparison_key")
+    )
+    matched = sorted(item["key"] for item in comparison.nodes.get("matched", []) if item.get("key"))
+    write_canonical_json(
+        path,
+        {
+            "only_in_autosys": only_in_autosys,
+            "only_in_stonebranch": only_in_stonebranch,
+            "matched": matched,
+        },
+    )
 
 
 def write_report(path: Path, comparison: Comparison) -> None:

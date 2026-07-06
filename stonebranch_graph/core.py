@@ -3,8 +3,18 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+from .domain import (
+    KIND_AGENT,
+    KIND_AGENT_CLUSTER,
+    KIND_BOX,
+    KIND_FILE_WATCHER,
+    KIND_TASK,
+    KIND_WORKFLOW,
+)
 
 
 @dataclass(frozen=True)
@@ -173,6 +183,68 @@ def comparison_name(value: str) -> str:
     return parts.get("real_name", str(value))
 
 
+# Default migration-noise suffix patterns stripped by `strip_migration_suffixes`.
+# Each pattern is matched case-insensitively against the end of the name.
+# Config-overridable via `AnalyzerConfig.suffix_strips` / `MappingConfig.suffix_strips`
+# so new migration-tooling suffix conventions are a settings edit, not a code change.
+DEFAULT_SUFFIX_STRIP_PATTERNS: tuple[str, ...] = (
+    r"[-_]tm$",
+    r"[-_]taskmonitor$",
+    r"[-_][0-9a-f]{8,}$",
+)
+
+_MAX_SUFFIX_STRIP_PASSES = 5
+
+
+def strip_migration_suffixes(name: str, patterns: Sequence[str] | None = None) -> str:
+    """Strip Stonebranch/AutoSys migration-tooling noise suffixes from a name.
+
+    Handles the `-tm` / `_tm` task-monitor suffix, an explicit `-taskmonitor`
+    marker, and a trailing content-hash suffix (`-<hex>` / `_<hex>`, 8+ hex
+    characters) so a migrated object and its twin on the other system collapse
+    onto the same comparison key. Patterns are end-anchored and applied
+    case-insensitively; stripping repeats until no pattern matches (bounded)
+    so chained suffixes (e.g. `-tm-a1b2c3d4e5f6`) are fully removed.
+
+    Pure function: does not touch `Node.name` / `Node.id` / `graph.json`.
+    """
+    patterns = tuple(patterns) if patterns is not None else DEFAULT_SUFFIX_STRIP_PATTERNS
+    if not patterns:
+        return name
+    compiled = [re.compile(pattern, re.IGNORECASE) for pattern in patterns if pattern]
+    text = name
+    for _ in range(_MAX_SUFFIX_STRIP_PASSES):
+        changed = False
+        for pattern in compiled:
+            stripped = pattern.sub("", text)
+            if stripped != text and stripped:
+                text = stripped
+                changed = True
+        if not changed:
+            break
+    return text
+
+
+# Kinds that represent the same migration concept in both schedulers are
+# collapsed for cross-system comparison, while the original Node.kind stays
+# untouched in graph.json and reports.
+COMPARISON_KIND_MAP = {
+    # AutoSys boxes and Stonebranch workflows are the same containment concept.
+    KIND_WORKFLOW: KIND_BOX,
+    # AutoSys file-watcher jobs migrate to Stonebranch file-monitor tasks; both
+    # are schedulable job objects with the same identity.
+    KIND_FILE_WATCHER: KIND_TASK,
+    # AutoSys "machine" may map to a Stonebranch agent or an agent cluster;
+    # both represent the runtime execution target.
+    KIND_AGENT_CLUSTER: KIND_AGENT,
+}
+
+
+def comparison_kind(kind: str) -> str:
+    """Return the kind used for cross-system comparison keys."""
+    return COMPARISON_KIND_MAP.get(kind, kind)
+
+
 def stable_hash(payload: Any, length: int = 16) -> str:
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:length]
@@ -184,6 +256,14 @@ def make_node_id(source_system: str, env: str, kind: str, name: str) -> str:
 
 
 def make_canonical_key(env: str, kind: str, name: str) -> str:
+    """Return the canonical key stored on `Node.canonical_key` / `graph.json`.
+
+    Intentionally does not strip migration-tooling suffixes (see
+    `strip_migration_suffixes`) or collapse kinds (see `comparison_kind`):
+    this key is part of the graph's source-of-truth payload and must stay
+    stable. Cross-system reconciliation applies those extra normalizations
+    on top of this key, without mutating it.
+    """
     return f"{env}:{kind}:{normalize_name(comparison_name(name))}"
 
 
