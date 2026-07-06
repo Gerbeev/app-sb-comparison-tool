@@ -1694,19 +1694,25 @@ function buildCy(opts){
     const nextById = new Map(lastBuild.elements.map(el => [el.data.id, el]));
     const prevEls = cy.elements();
     const addDefs = [];
-    const repositionEls = [];
     const staleIds = new Set();
     nextById.forEach((def, id) => {
       const existing = cy.getElementById(id);
       if(!existing.length){ addDefs.push(def); return; }
-      if(JSON.stringify(existing.data()) === JSON.stringify(def.data)){ repositionEls.push(existing); }
-      else { staleIds.add(id); addDefs.push(def); }
+      if(JSON.stringify(existing.data()) !== JSON.stringify(def.data)){ staleIds.add(id); addDefs.push(def); }
     });
     const removeColl = prevEls.filter(el => !nextById.has(el.id()) || staleIds.has(el.id()));
     cy.batch(() => {
       if(removeColl.length) cy.remove(removeColl);
       if(addDefs.length) cy.add(addDefs);
-      repositionEls.forEach(el => {
+      // Re-apply the freshly computed layout to EVERY visible leaf node, not
+      // just the ones that already existed. Nodes added via cy.add() carry no
+      // position and would otherwise default to (0,0) - so the children
+      // revealed by expanding a box would all pile up on top of each other at
+      // the origin (and drag any fit box out to "whole graph" zoom). Compound
+      // parents are skipped on purpose: Cytoscape auto-sizes them around their
+      // children, and calling .position() on a parent drags its whole subtree.
+      cy.nodes().forEach(el => {
+        if(el.isParent()) return;
         const pos = lastBuild.positions[el.id()];
         if(pos) el.position(pos);
       });
@@ -1734,6 +1740,33 @@ function fitToVisible(ids, padding){
   if(collection) cy.fit(collection, padding || 70);
   else cy.fit(undefined, 40);
 }
+// Rendered (screen-pixel) center of whatever is currently on-screen for `id`
+// - the job itself, its collapsed box chip, or its expanded group container.
+function renderedCenterOf(id){
+  if(!cy || !lastBuild) return null;
+  const vis = resolveToUnit(id, lastBuild.endpointIds, null) || (lastBuild.groupIds.has(id) ? id : null);
+  if(!vis) return null;
+  const ele = cy.getElementById(vis);
+  if(!ele || !ele.length) return null;
+  return { ...ele.renderedPosition() };
+}
+// Rebuild the graph while keeping the camera still. We remember where the
+// clicked element sat on screen, run the mutation (which reflows the layout),
+// then pan by exactly the delta so that same element stays under the cursor.
+// Zoom is never touched. This is what makes expand/collapse/focus feel like
+// the box opens "in place" instead of the view snapping to a new fit.
+function keepViewport(anchorId, mutate){
+  const savedPan = cy ? { ...cy.pan() } : null;
+  const before = anchorId != null ? renderedCenterOf(anchorId) : null;
+  mutate();
+  if(!cy) return;
+  const after = anchorId != null ? renderedCenterOf(anchorId) : null;
+  if(before && after){
+    cy.panBy({ x: before.x - after.x, y: before.y - after.y });
+  } else if(savedPan){
+    cy.pan(savedPan);
+  }
+}
 function zoomBy(factor){
   if(!cy) return;
   const target = Math.max(cy.minZoom(), Math.min(cy.maxZoom(), cy.zoom() * factor));
@@ -1757,20 +1790,21 @@ function chainSize(id, adj){
    ------------------------------------------------------------------- */
 function ancestorChainInclusive(groupId){ return [...ancestorChain(groupId), groupId]; }
 function expandBoxPath(groupId){
-  expandedGroups = new Set(ancestorChainInclusive(groupId));
-  buildCy({ skipFit: true });
+  keepViewport(groupId, () => {
+    expandedGroups = new Set(ancestorChainInclusive(groupId));
+    buildCy({ skipFit: true });
+  });
   clearHighlightClasses();
   const linked = linkedGroups(groupId);
   for(const g of linked) markMatchIfVisible(g);
-  fitToVisible([groupId, ...linked], 80);
   showGroupPanel(groupId);
 }
 function collapseGroup(groupId){
-  expandedGroups = new Set(ancestorChain(groupId));
-  buildCy({ skipFit: true });
+  keepViewport(groupId, () => {
+    expandedGroups = new Set(ancestorChain(groupId));
+    buildCy({ skipFit: true });
+  });
   clearHighlightClasses();
-  const anchor = groupById[groupId]?.parent;
-  fitToVisible(anchor ? [anchor] : [groupId], 100);
   showGroupPanel(groupId);
 }
 function linkedGroups(groupId){
@@ -1787,8 +1821,10 @@ function markMatchIfVisible(groupId){
   if(vis) cy.getElementById(vis).addClass('match');
 }
 function focusJob(jobId){
-  expandedGroups = new Set(ancestorChain(jobId));
-  buildCy({ skipFit: true });
+  keepViewport(jobId, () => {
+    expandedGroups = new Set(ancestorChain(jobId));
+    buildCy({ skipFit: true });
+  });
   clearHighlightClasses();
   cy.getElementById(jobId).addClass('sel');
   for(const d of (upOf[jobId] || [])){
@@ -1803,7 +1839,6 @@ function focusJob(jobId){
     if(edge.source().hasClass('up') && edge.target().id() === jobId) edge.addClass('up');
     if(edge.target().hasClass('down') && edge.source().id() === jobId) edge.addClass('down');
   });
-  fitToVisible([jobId, ...(upOf[jobId] || []), ...(downOf[jobId] || [])], 90);
   showJobPanel(jobId);
 }
 function selectEdge(edgeVisualId){
