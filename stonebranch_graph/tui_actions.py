@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import AnalyzerConfig
+from .domain import SOURCE_AUTOSYS_JIL, SOURCE_STONEBRANCH
 from .tui_settings import TuiSettings, optional_path
 from .workflows import (
     CompareSkeletonResult,
@@ -50,6 +51,20 @@ from .workflows import (
 
 def runtime_config(settings: TuiSettings, config: AnalyzerConfig) -> AnalyzerConfig:
     return config.with_runtime_flags(include_raw_values=settings.include_raw_values)
+
+
+def _pack_reconciliation_key_paths(settings: TuiSettings) -> tuple[Path, Path]:
+    return (
+        Path(settings.stonebranch_pack_path) / "ids" / f"{SOURCE_STONEBRANCH}.keys.json",
+        Path(settings.jil_pack_path) / "ids" / f"{SOURCE_AUTOSYS_JIL}.keys.json",
+    )
+
+
+def resolve_reconciliation_key_paths(settings: TuiSettings) -> tuple[Path, Path]:
+    pack_paths = _pack_reconciliation_key_paths(settings)
+    if all(path.exists() for path in pack_paths):
+        return pack_paths
+    return keys_compare_default_paths(Path(settings.reconciliation_keys_path))
 
 
 def build_stonebranch_pack(settings: TuiSettings, config: AnalyzerConfig) -> GraphWorkflowResult:
@@ -146,12 +161,12 @@ def reconciliation_keys(settings: TuiSettings, config: AnalyzerConfig) -> Reconc
 
 
 def reconciliation_keys_ready(settings: TuiSettings) -> bool:
-    sb_keys_path, jil_keys_path = keys_compare_default_paths(Path(settings.reconciliation_keys_path))
+    sb_keys_path, jil_keys_path = resolve_reconciliation_key_paths(settings)
     return sb_keys_path.exists() and jil_keys_path.exists()
 
 
 def compare_reconciliation_keys(settings: TuiSettings) -> KeysCompareWorkflowResult:
-    sb_keys_path, jil_keys_path = keys_compare_default_paths(Path(settings.reconciliation_keys_path))
+    sb_keys_path, jil_keys_path = resolve_reconciliation_key_paths(settings)
     return run_compare_reconciliation_keys(
         stonebranch_keys_path=sb_keys_path,
         jil_keys_path=jil_keys_path,

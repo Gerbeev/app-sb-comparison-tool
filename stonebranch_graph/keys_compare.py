@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -182,11 +183,24 @@ def export_keys_comparison_json(comparison: KeysComparison, path: Path) -> None:
 # unreadable multi-thousand-line document; the JSON report always carries
 # the full lists for tooling/further processing.
 MAX_LISTED_OBJECTS_PER_KIND = 500
+COLLAPSIBLE_LIST_THRESHOLD = 25
 
 
-def _grouped_object_lines(keys: list[str]) -> list[str]:
+def _summary_label(kind: str, present_system: str, missing_system: str, count: int) -> str:
+    return f"{kind}: present in {present_system}, missing in {missing_system} ({count})"
+
+
+def _render_object_list(names: list[str]) -> list[str]:
+    shown = names[:MAX_LISTED_OBJECTS_PER_KIND]
+    lines = [f"- `{name}`" for name in shown]
+    if len(names) > MAX_LISTED_OBJECTS_PER_KIND:
+        lines.append(f"- _...and {len(names) - MAX_LISTED_OBJECTS_PER_KIND} more (see the JSON report for the full list)._")
+    return lines
+
+
+def _grouped_object_lines(keys: list[str], *, present_system: str, missing_system: str) -> list[str]:
     if not keys:
-        return ["_None -- every object on this side has a twin on the other side._", ""]
+        return [f"_None -- every {present_system} object in scope has a matching object in {missing_system}._", ""]
     grouped: dict[str, list[str]] = {}
     for key in keys:
         kind, name, env = parse_key(key)
@@ -194,13 +208,18 @@ def _grouped_object_lines(keys: list[str]) -> list[str]:
     lines: list[str] = []
     for kind in sorted(grouped):
         names = sorted(grouped[kind])
-        lines.append(f"### {kind} ({len(names)})")
-        lines.append("")
-        shown = names[:MAX_LISTED_OBJECTS_PER_KIND]
-        for name in shown:
-            lines.append(f"- `{name}`")
-        if len(names) > MAX_LISTED_OBJECTS_PER_KIND:
-            lines.append(f"- _...and {len(names) - MAX_LISTED_OBJECTS_PER_KIND} more (see the JSON report for the full list)._")
+        label = _summary_label(kind, present_system, missing_system, len(names))
+        if len(names) > COLLAPSIBLE_LIST_THRESHOLD:
+            lines.append("<details>")
+            lines.append(f"<summary>{html.escape(label)}</summary>")
+            lines.append("")
+            lines.extend(_render_object_list(names))
+            lines.append("")
+            lines.append("</details>")
+        else:
+            lines.append(f"### {label}")
+            lines.append("")
+            lines.extend(_render_object_list(names))
         lines.append("")
     return lines
 
@@ -223,13 +242,13 @@ def export_keys_comparison_markdown(comparison: KeysComparison, path: Path) -> N
         f"| AutoSys objects | {s['jil_keys_total']} |",
         f"| Union (distinct objects across both systems) | {s['union_total']} |",
         f"| Matched (present in both systems) | {s['matched_total']} |",
-        f"| Only in Stonebranch | {s['only_in_stonebranch_total']} |",
-        f"| Only in AutoSys | {s['only_in_jil_total']} |",
+        f"| Present in Stonebranch, missing in AutoSys | {s['only_in_stonebranch_total']} |",
+        f"| Present in AutoSys, missing in Stonebranch | {s['only_in_jil_total']} |",
         f"| Match rate | {s['match_rate_percent']}% |",
         "",
         "## Breakdown by object type",
         "",
-        "| Kind | Stonebranch | AutoSys | Matched | Only in Stonebranch | Only in AutoSys |",
+        "| Kind | Stonebranch | AutoSys | Matched | Present in Stonebranch, missing in AutoSys | Present in AutoSys, missing in Stonebranch |",
         "|---|---|---|---|---|---|",
     ]
     for stats in comparison.by_kind:
@@ -237,9 +256,17 @@ def export_keys_comparison_markdown(comparison: KeysComparison, path: Path) -> N
             f"| {stats.kind} | {stats.stonebranch_total} | {stats.jil_total} | "
             f"{stats.matched} | {stats.only_in_stonebranch} | {stats.only_in_jil} |"
         )
-    lines += ["", "## Objects only in Stonebranch", ""]
-    lines += _grouped_object_lines(comparison.only_in_stonebranch)
-    lines += ["## Objects only in AutoSys", ""]
-    lines += _grouped_object_lines(comparison.only_in_jil)
+    lines += ["", "## Objects present in Stonebranch but missing in AutoSys", ""]
+    lines += _grouped_object_lines(
+        comparison.only_in_stonebranch,
+        present_system="Stonebranch",
+        missing_system="AutoSys",
+    )
+    lines += ["## Objects present in AutoSys but missing in Stonebranch", ""]
+    lines += _grouped_object_lines(
+        comparison.only_in_jil,
+        present_system="AutoSys",
+        missing_system="Stonebranch",
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")

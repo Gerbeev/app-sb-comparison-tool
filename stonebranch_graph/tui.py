@@ -374,11 +374,15 @@ class TerminalUi:
         self.pause()
 
     def compare_reconciliation_keys(self) -> None:
-        s = self.ensure_settings_for("reconciliation-keys")
-        if s is None:
-            return
+        s = self.settings
         if not tui_actions.reconciliation_keys_ready(s):
-            self.warn("ids/stonebranch.keys.json and/or ids/autosys.keys.json not found yet - building them first.")
+            s = self.ensure_settings_for("reconciliation-keys")
+            if s is None:
+                return
+            self.warn(
+                "Existing ids/stonebranch.keys.json and ids/autosys.keys.json were not found in the "
+                "system pack folders or the reconciliation folder - building them first."
+            )
             tui_actions.reconciliation_keys(s, self.config)
         result = tui_actions.compare_reconciliation_keys(s)
         self.last_summary = result.summary
